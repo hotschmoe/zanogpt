@@ -57,6 +57,14 @@ fn initMatrix(
     return rows;
 }
 
+fn freeMatrix(gpa: std.mem.Allocator, mat: [][]*Value) void {
+    for (mat) |row| {
+        for (row) |v| gpa.destroy(v);
+        gpa.free(row);
+    }
+    gpa.free(mat);
+}
+
 // ============================================================================
 // State dict: all model weight matrices
 // ============================================================================
@@ -92,6 +100,20 @@ fn initStateDict(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !StateDict
         };
     }
     return sd;
+}
+
+fn deinitStateDict(gpa: std.mem.Allocator, sd: *StateDict) void {
+    freeMatrix(gpa, sd.wte);
+    freeMatrix(gpa, sd.wpe);
+    freeMatrix(gpa, sd.lm_head);
+    for (&sd.layers) |*layer| {
+        freeMatrix(gpa, layer.attn_wq);
+        freeMatrix(gpa, layer.attn_wk);
+        freeMatrix(gpa, layer.attn_wv);
+        freeMatrix(gpa, layer.attn_wo);
+        freeMatrix(gpa, layer.mlp_fc1);
+        freeMatrix(gpa, layer.mlp_fc2);
+    }
 }
 
 fn appendMatrixParams(list: *std.ArrayList(*Value), alloc: std.mem.Allocator, mat: [][]*Value) !void {
@@ -275,6 +297,7 @@ pub fn main() !void {
 
     // Initialize model
     var sd = try initStateDict(gpa, &rng);
+    defer deinitStateDict(gpa, &sd);
     const params = try flattenParams(gpa, &sd);
     defer gpa.free(params);
     try stdout.print("num params: {d}\n", .{params.len});
