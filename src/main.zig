@@ -208,6 +208,9 @@ pub fn main() !void {
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
 
+    try zanogpt.backend.init();
+    defer zanogpt.backend.deinit();
+
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &stdout_writer.interface;

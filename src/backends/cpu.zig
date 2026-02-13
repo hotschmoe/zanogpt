@@ -1,3 +1,6 @@
+pub fn init() !void {}
+pub fn deinit() void {}
+
 pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize) void {
     const VEC = 8;
     for (0..M) |i| {
