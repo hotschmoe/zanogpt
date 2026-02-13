@@ -4,7 +4,7 @@ const ov_ir = @import("ov_ir.zig");
 const cpu = @import("cpu.zig");
 const log = std.log.scoped(.intel_npu);
 
-// ── Module-level state (Phase 3 — lifecycle) ──
+// ── Module-level state ──
 
 var lib: ?std.DynLib = null;
 var dispatch: ?ze.Dispatch = null;
@@ -12,9 +12,6 @@ var driver: ?ze.ze_driver_handle_t = null;
 var device: ?ze.ze_device_handle_t = null;
 var context: ?ze.ze_context_handle_t = null;
 var queue: ?ze.ze_command_queue_handle_t = null;
-
-// ── Module-level state (Phase 4 — graph execution) ──
-
 var graph_ddi: ?*const ze.ze_graph_dditable_t = null;
 var cmd_list: ?ze.ze_command_list_handle_t = null;
 var fence: ?ze.ze_fence_handle_t = null;
@@ -23,7 +20,8 @@ var compiler_ver: ze.ze_graph_compiler_version_info_t = .{};
 // ── Graph cache ──
 
 pub const ShapeKey = struct {
-    op: enum { matmul, softmax, relu },
+    pub const Op = enum { matmul, softmax, relu };
+    op: Op,
     dims: [4]u32,
 };
 
@@ -51,16 +49,14 @@ const CacheEntry = struct {
 };
 
 const MAX_CACHED = 32;
-var cached_graphs: [MAX_CACHED]CacheEntry = [_]CacheEntry{.{
-    .key = .{ .op = .relu, .dims = .{ 0, 0, 0, 0 } },
-    .graph = .{
-        .graph = undefined,
-        .num_args = 0,
-        .arg_bufs = undefined,
-    },
-    .occupied = false,
-}} ** MAX_CACHED;
+var cached_graphs: [MAX_CACHED]CacheEntry = .{empty_cache_entry} ** MAX_CACHED;
 var num_cached: usize = 0;
+
+const empty_cache_entry = CacheEntry{
+    .key = .{ .op = .relu, .dims = .{ 0, 0, 0, 0 } },
+    .graph = .{ .graph = undefined, .num_args = 0, .arg_bufs = undefined },
+    .occupied = false,
+};
 
 // ── Lifecycle ──
 
@@ -198,12 +194,8 @@ fn smokeTest() !void {
         2,
     );
 
-    // Write test input: [-1, 0, 2, -3]
-    const in_buf = cached.arg_bufs[0].asF32Slice();
-    in_buf[0] = -1.0;
-    in_buf[1] = 0.0;
-    in_buf[2] = 2.0;
-    in_buf[3] = -3.0;
+    const test_input = [_]f32{ -1.0, 0.0, 2.0, -3.0 };
+    @memcpy(cached.arg_bufs[0].asF32Slice()[0..4], &test_input);
 
     executeGraph(cached);
 
@@ -249,7 +241,7 @@ pub fn deinit() void {
 
     graph_ddi = null;
 
-    // 3. Existing cleanup (queue, context, lib)
+    // 3. Destroy queue, context, and unload library
     if (queue) |q| {
         ze.check(d.zeCommandQueueDestroy(q)) catch {};
         queue = null;
@@ -301,7 +293,6 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
         .format = .NGRAPH_LITE,
         .inputSize = blob.len,
         .pInput = &blob.data,
-        .pBuildFlags = null,
         .compilerVersion = compiler_ver,
     };
     var graph: ze.ze_graph_handle_t = undefined;
@@ -340,16 +331,10 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
         try ze.check(ddi.pfnSetArgumentValue(graph, @intCast(i), ptr.?));
     }
 
-    // Initialize graph (one-time)
+    // Initialize graph (one-time submit + sync)
     const cl = cmd_list.?;
     try ze.check(ddi.pfnAppendGraphInitialize(cl, graph, null, 0, null));
-    try ze.check(d.zeCommandListClose(cl));
-
-    var cl_tmp = cl;
-    try ze.check(d.zeCommandQueueExecuteCommandLists(queue.?, 1, &cl_tmp, fence.?));
-    try ze.check(d.zeFenceHostSynchronize(fence.?, ze.MAX_U64));
-    try ze.check(d.zeFenceReset(fence.?));
-    try ze.check(d.zeCommandListReset(cl));
+    try submitAndSync(cl);
 
     // Store in cache
     const entry = &cached_graphs[num_cached];
@@ -368,24 +353,22 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
 }
 
 fn executeGraph(cached: *const CachedGraph) void {
-    const d = dispatch.?;
     const ddi = graph_ddi.?;
     const cl = cmd_list.?;
-
     ze.check(ddi.pfnAppendGraphExecute(cl, cached.graph, null, null, 0, null)) catch
         @panic("pfnAppendGraphExecute failed");
-    ze.check(d.zeCommandListClose(cl)) catch
-        @panic("zeCommandListClose failed");
+    submitAndSync(cl) catch @panic("graph execution submit/sync failed");
+}
 
+/// Close the command list, submit it to the queue, wait on the fence, then reset both.
+fn submitAndSync(cl: ze.ze_command_list_handle_t) !void {
+    const d = dispatch.?;
+    try ze.check(d.zeCommandListClose(cl));
     var cl_tmp = cl;
-    ze.check(d.zeCommandQueueExecuteCommandLists(queue.?, 1, &cl_tmp, fence.?)) catch
-        @panic("zeCommandQueueExecuteCommandLists failed");
-    ze.check(d.zeFenceHostSynchronize(fence.?, ze.MAX_U64)) catch
-        @panic("zeFenceHostSynchronize failed");
-    ze.check(d.zeFenceReset(fence.?)) catch
-        @panic("zeFenceReset failed");
-    ze.check(d.zeCommandListReset(cl)) catch
-        @panic("zeCommandListReset failed");
+    try ze.check(d.zeCommandQueueExecuteCommandLists(queue.?, 1, &cl_tmp, fence.?));
+    try ze.check(d.zeFenceHostSynchronize(fence.?, ze.MAX_U64));
+    try ze.check(d.zeFenceReset(fence.?));
+    try ze.check(d.zeCommandListReset(cl));
 }
 
 // ── Backend contract (forward ops) ──
@@ -413,35 +396,25 @@ pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize
 }
 
 pub fn softmax_fwd(input: []const f32, output: []f32, n: usize) void {
-    const cached = getOrCompileGraph(
-        .{ .op = .softmax, .dims = .{ @intCast(n), 0, 0, 0 } },
-        &.{ n * @sizeOf(f32), n * @sizeOf(f32) },
-        2,
-    ) catch @panic("NPU softmax graph compilation failed");
-
-    const in_buf = cached.arg_bufs[0].asF32Slice();
-    @memcpy(in_buf[0..n], input[0..n]);
-
-    executeGraph(cached);
-
-    const out_buf = cached.arg_bufs[1].asF32Slice();
-    @memcpy(output[0..n], out_buf[0..n]);
+    runUnaryGraph(.softmax, input, output, n);
 }
 
 pub fn relu_fwd(input: []const f32, output: []f32, n: usize) void {
+    runUnaryGraph(.relu, input, output, n);
+}
+
+/// Shared implementation for unary NPU ops (2-arg graph: input + output).
+fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize) void {
+    const size = n * @sizeOf(f32);
     const cached = getOrCompileGraph(
-        .{ .op = .relu, .dims = .{ @intCast(n), 0, 0, 0 } },
-        &.{ n * @sizeOf(f32), n * @sizeOf(f32) },
+        .{ .op = op, .dims = .{ @intCast(n), 0, 0, 0 } },
+        &.{ size, size },
         2,
-    ) catch @panic("NPU relu graph compilation failed");
+    ) catch @panic("NPU unary graph compilation failed");
 
-    const in_buf = cached.arg_bufs[0].asF32Slice();
-    @memcpy(in_buf[0..n], input[0..n]);
-
+    @memcpy(cached.arg_bufs[0].asF32Slice()[0..n], input[0..n]);
     executeGraph(cached);
-
-    const out_buf = cached.arg_bufs[1].asF32Slice();
-    @memcpy(output[0..n], out_buf[0..n]);
+    @memcpy(output[0..n], cached.arg_bufs[1].asF32Slice()[0..n]);
 }
 
 pub fn rmsnorm_fwd(input: []const f32, output: []f32, n: usize, scale_out: *f32) void {

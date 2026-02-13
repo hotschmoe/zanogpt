@@ -10,40 +10,28 @@ pub const BlobBuf = struct {
     }
 };
 
-/// Generate an NGRAPH_LITE blob for MatMul(W[M,K] @ x[K]) → out[M].
+/// Generate an NGRAPH_LITE blob for MatMul(W[M,K] @ x[K]) -> out[M].
 /// W is input 0 (shape [M,K]), x is input 1 (shape [K]), result is shape [M].
 pub fn matmulBlob(M: usize, K: usize) BlobBuf {
-    var buf = BlobBuf{};
-
-    // Generate XML into a temp region after the 8-byte header
-    const xml = std.fmt.bufPrint(buf.data[8..], matmul_xml_template, .{ M, K, M, K, K, K, M, K, K, M, M }) catch @panic("matmul IR XML exceeded BlobBuf capacity");
-    const xml_len: u64 = @intCast(xml.len);
-
-    // Write 8-byte LE length header
-    @memcpy(buf.data[0..8], std.mem.asBytes(&xml_len));
-    buf.len = 8 + xml.len;
-    return buf;
+    return makeBlob(matmul_xml_template, .{ M, K, M, K, K, K, M, K, K, M, M });
 }
 
 /// Generate an NGRAPH_LITE blob for SoftMax over N elements.
 pub fn softmaxBlob(N: usize) BlobBuf {
-    var buf = BlobBuf{};
-
-    const xml = std.fmt.bufPrint(buf.data[8..], softmax_xml_template, .{ N, N, N, N, N }) catch @panic("softmax IR XML exceeded BlobBuf capacity");
-    const xml_len: u64 = @intCast(xml.len);
-
-    @memcpy(buf.data[0..8], std.mem.asBytes(&xml_len));
-    buf.len = 8 + xml.len;
-    return buf;
+    return makeBlob(softmax_xml_template, .{ N, N, N, N, N });
 }
 
 /// Generate an NGRAPH_LITE blob for ReLU over N elements.
 pub fn reluBlob(N: usize) BlobBuf {
+    return makeBlob(relu_xml_template, .{ N, N, N, N, N });
+}
+
+/// Format an XML template with args into a BlobBuf with an 8-byte LE length header.
+fn makeBlob(comptime template: []const u8, args: anytype) BlobBuf {
     var buf = BlobBuf{};
-
-    const xml = std.fmt.bufPrint(buf.data[8..], relu_xml_template, .{ N, N, N, N, N }) catch @panic("relu IR XML exceeded BlobBuf capacity");
+    const xml = std.fmt.bufPrint(buf.data[8..], template, args) catch
+        @panic("IR XML exceeded BlobBuf capacity");
     const xml_len: u64 = @intCast(xml.len);
-
     @memcpy(buf.data[0..8], std.mem.asBytes(&xml_len));
     buf.len = 8 + xml.len;
     return buf;
@@ -129,40 +117,26 @@ const relu_xml_template =
 
 // ── Tests ──
 
-test "matmulBlob produces valid blob" {
-    const blob = matmulBlob(3, 2);
+fn expectValidBlob(blob: *const BlobBuf, expected_op: []const u8) !void {
     try std.testing.expect(blob.len > 8);
-
-    // First 8 bytes are LE u64 xml length
     const xml_len = std.mem.readInt(u64, blob.data[0..8], .little);
     try std.testing.expectEqual(blob.len - 8, xml_len);
-
-    // XML starts with <?xml
     const xml = blob.data[8..blob.len];
     try std.testing.expect(std.mem.startsWith(u8, xml, "<?xml"));
-    try std.testing.expect(std.mem.indexOf(u8, xml, "MatMul") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, expected_op) != null);
+}
+
+test "matmulBlob produces valid blob" {
+    const blob = matmulBlob(3, 2);
+    try expectValidBlob(&blob, "MatMul");
 }
 
 test "softmaxBlob produces valid blob" {
     const blob = softmaxBlob(16);
-    try std.testing.expect(blob.len > 8);
-
-    const xml_len = std.mem.readInt(u64, blob.data[0..8], .little);
-    try std.testing.expectEqual(blob.len - 8, xml_len);
-
-    const xml = blob.data[8..blob.len];
-    try std.testing.expect(std.mem.startsWith(u8, xml, "<?xml"));
-    try std.testing.expect(std.mem.indexOf(u8, xml, "SoftMax") != null);
+    try expectValidBlob(&blob, "SoftMax");
 }
 
 test "reluBlob produces valid blob" {
     const blob = reluBlob(4);
-    try std.testing.expect(blob.len > 8);
-
-    const xml_len = std.mem.readInt(u64, blob.data[0..8], .little);
-    try std.testing.expectEqual(blob.len - 8, xml_len);
-
-    const xml = blob.data[8..blob.len];
-    try std.testing.expect(std.mem.startsWith(u8, xml, "<?xml"));
-    try std.testing.expect(std.mem.indexOf(u8, xml, "ReLU") != null);
+    try expectValidBlob(&blob, "ReLU");
 }

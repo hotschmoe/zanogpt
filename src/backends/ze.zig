@@ -240,28 +240,12 @@ pub const Dispatch = struct {
     zeDriverGetExtensionFunctionAddress: pfnDriverGetExtensionFunctionAddress,
 
     pub fn load(l: *std.DynLib) !Dispatch {
-        return .{
-            .zeInit = l.lookup(pfnInit, "zeInit") orelse return error.SymbolNotFound,
-            .zeDriverGet = l.lookup(pfnDriverGet, "zeDriverGet") orelse return error.SymbolNotFound,
-            .zeDeviceGet = l.lookup(pfnDeviceGet, "zeDeviceGet") orelse return error.SymbolNotFound,
-            .zeDeviceGetProperties = l.lookup(pfnDeviceGetProperties, "zeDeviceGetProperties") orelse return error.SymbolNotFound,
-            .zeContextCreate = l.lookup(pfnContextCreate, "zeContextCreate") orelse return error.SymbolNotFound,
-            .zeContextDestroy = l.lookup(pfnContextDestroy, "zeContextDestroy") orelse return error.SymbolNotFound,
-            .zeCommandQueueCreate = l.lookup(pfnCommandQueueCreate, "zeCommandQueueCreate") orelse return error.SymbolNotFound,
-            .zeCommandQueueDestroy = l.lookup(pfnCommandQueueDestroy, "zeCommandQueueDestroy") orelse return error.SymbolNotFound,
-            .zeCommandListCreate = l.lookup(pfnCommandListCreate, "zeCommandListCreate") orelse return error.SymbolNotFound,
-            .zeCommandListDestroy = l.lookup(pfnCommandListDestroy, "zeCommandListDestroy") orelse return error.SymbolNotFound,
-            .zeCommandListClose = l.lookup(pfnCommandListClose, "zeCommandListClose") orelse return error.SymbolNotFound,
-            .zeCommandListReset = l.lookup(pfnCommandListReset, "zeCommandListReset") orelse return error.SymbolNotFound,
-            .zeCommandQueueExecuteCommandLists = l.lookup(pfnCommandQueueExecuteCommandLists, "zeCommandQueueExecuteCommandLists") orelse return error.SymbolNotFound,
-            .zeFenceCreate = l.lookup(pfnFenceCreate, "zeFenceCreate") orelse return error.SymbolNotFound,
-            .zeFenceDestroy = l.lookup(pfnFenceDestroy, "zeFenceDestroy") orelse return error.SymbolNotFound,
-            .zeFenceHostSynchronize = l.lookup(pfnFenceHostSynchronize, "zeFenceHostSynchronize") orelse return error.SymbolNotFound,
-            .zeFenceReset = l.lookup(pfnFenceReset, "zeFenceReset") orelse return error.SymbolNotFound,
-            .zeMemAllocShared = l.lookup(pfnMemAllocShared, "zeMemAllocShared") orelse return error.SymbolNotFound,
-            .zeMemFree = l.lookup(pfnMemFree, "zeMemFree") orelse return error.SymbolNotFound,
-            .zeDriverGetExtensionFunctionAddress = l.lookup(pfnDriverGetExtensionFunctionAddress, "zeDriverGetExtensionFunctionAddress") orelse return error.SymbolNotFound,
-        };
+        var self: Dispatch = undefined;
+        inline for (@typeInfo(Dispatch).@"struct".fields) |f| {
+            @field(self, f.name) = l.lookup(f.type, f.name) orelse
+                return error.SymbolNotFound;
+        }
+        return self;
     }
 };
 
