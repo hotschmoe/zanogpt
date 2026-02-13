@@ -3,21 +3,15 @@ const zanogpt = @import("zanogpt");
 const Tensor = zanogpt.Tensor;
 const Tape = zanogpt.Tape;
 
-// ============================================================================
-// Hyperparameters (matching microgpt.py)
-// ============================================================================
 const n_embd: usize = 16;
 const n_head: usize = 4;
 const n_layer: usize = 1;
 const block_size: usize = 16;
-const head_dim: usize = n_embd / n_head; // 4
+const head_dim: usize = n_embd / n_head;
 
-// ============================================================================
-// Tokenizer
-// ============================================================================
 const uchars = "abcdefghijklmnopqrstuvwxyz";
-const BOS: usize = uchars.len; // 26
-const vocab_size: usize = uchars.len + 1; // 27
+const BOS: usize = uchars.len;
+const vocab_size: usize = uchars.len + 1;
 
 fn charToToken(ch: u8) usize {
     return ch - 'a';
@@ -27,31 +21,25 @@ fn tokenToChar(token: usize) u8 {
     return @intCast(token + 'a');
 }
 
-// ============================================================================
-// Weight initialization
-// ============================================================================
 fn initWeight(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256, shape: []const usize, std_dev: f32) !*Tensor {
     const t = try Tensor.init(gpa, shape, true);
     t.fillRandom(rng, std_dev);
     return t;
 }
 
-// ============================================================================
-// State dict: all model weight tensors
-// ============================================================================
 const LayerWeights = struct {
-    attn_wq: *Tensor, // [n_embd, n_embd]
+    attn_wq: *Tensor,
     attn_wk: *Tensor,
     attn_wv: *Tensor,
     attn_wo: *Tensor,
-    mlp_fc1: *Tensor, // [4*n_embd, n_embd]
-    mlp_fc2: *Tensor, // [n_embd, 4*n_embd]
+    mlp_fc1: *Tensor,
+    mlp_fc2: *Tensor,
 };
 
 const StateDict = struct {
-    wte: *Tensor, // [vocab_size, n_embd]
-    wpe: *Tensor, // [block_size, n_embd]
-    lm_head: *Tensor, // [vocab_size, n_embd]
+    wte: *Tensor,
+    wpe: *Tensor,
+    lm_head: *Tensor,
     layers: [n_layer]LayerWeights,
 };
 
@@ -74,20 +62,10 @@ fn initStateDict(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !StateDict
 }
 
 fn deinitStateDict(sd: *StateDict) void {
-    sd.wte.deinit();
-    sd.wpe.deinit();
-    sd.lm_head.deinit();
-    for (&sd.layers) |*layer| {
-        layer.attn_wq.deinit();
-        layer.attn_wk.deinit();
-        layer.attn_wv.deinit();
-        layer.attn_wo.deinit();
-        layer.mlp_fc1.deinit();
-        layer.mlp_fc2.deinit();
-    }
+    const params = flattenParams(sd);
+    for (&params) |p| p.deinit();
 }
 
-// Registered tape indices for all weights
 const RegisteredLayerWeights = struct {
     attn_wq: usize,
     attn_wk: usize,
@@ -126,33 +104,20 @@ const param_count = 3 + n_layer * 6;
 
 fn flattenParams(sd: *const StateDict) [param_count]*Tensor {
     var params: [param_count]*Tensor = undefined;
-    var idx: usize = 0;
-    params[idx] = sd.wte;
-    idx += 1;
-    params[idx] = sd.wpe;
-    idx += 1;
-    params[idx] = sd.lm_head;
-    idx += 1;
+    var i: usize = 0;
+    for ([_]*Tensor{ sd.wte, sd.wpe, sd.lm_head }) |p| {
+        params[i] = p;
+        i += 1;
+    }
     for (&sd.layers) |*layer| {
-        params[idx] = layer.attn_wq;
-        idx += 1;
-        params[idx] = layer.attn_wk;
-        idx += 1;
-        params[idx] = layer.attn_wv;
-        idx += 1;
-        params[idx] = layer.attn_wo;
-        idx += 1;
-        params[idx] = layer.mlp_fc1;
-        idx += 1;
-        params[idx] = layer.mlp_fc2;
-        idx += 1;
+        for ([_]*Tensor{ layer.attn_wq, layer.attn_wk, layer.attn_wv, layer.attn_wo, layer.mlp_fc1, layer.mlp_fc2 }) |p| {
+            params[i] = p;
+            i += 1;
+        }
     }
     return params;
 }
 
-// ============================================================================
-// KV Cache (stores tape indices)
-// ============================================================================
 const KVCache = struct {
     keys: [n_layer]std.ArrayList(usize),
     values: [n_layer]std.ArrayList(usize),
@@ -167,9 +132,6 @@ const KVCache = struct {
     }
 };
 
-// ============================================================================
-// GPT forward pass
-// ============================================================================
 fn gpt(
     tape: *Tape,
     token_id: usize,
@@ -178,7 +140,6 @@ fn gpt(
     reg: *const RegisteredWeights,
     arena: std.mem.Allocator,
 ) !usize {
-    // Token + position embedding
     const tok_emb = try tape.embeddingLookup(reg.wte, token_id);
     const pos_emb = try tape.embeddingLookup(reg.wpe, pos_id);
     var x = try tape.addOp(tok_emb, pos_emb);
@@ -187,7 +148,6 @@ fn gpt(
     for (0..n_layer) |li| {
         const layer = &reg.layers[li];
 
-        // 1) Multi-head attention
         const x_residual = x;
         x = try tape.rmsnormOp(x);
         const q = try tape.matmulOp(layer.attn_wq, x);
@@ -208,7 +168,6 @@ fn gpt(
         x = try tape.matmulOp(layer.attn_wo, attn_out);
         x = try tape.addOp(x, x_residual);
 
-        // 2) MLP block
         const x_residual2 = x;
         x = try tape.rmsnormOp(x);
         var hidden = try tape.matmulOp(layer.mlp_fc1, x);
@@ -220,9 +179,6 @@ fn gpt(
     return tape.matmulOp(reg.lm_head, x);
 }
 
-// ============================================================================
-// Data loading
-// ============================================================================
 fn loadDocs(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !struct { docs: [][]const u8, backing: []u8 } {
     const file = try std.fs.cwd().openFile("data/names.txt", .{});
     defer file.close();
@@ -236,7 +192,6 @@ fn loadDocs(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !struct { docs:
             try docs.append(gpa, trimmed);
         }
     }
-    // Shuffle with Fisher-Yates
     const items = docs.items;
     var i: usize = items.len - 1;
     while (i > 0) : (i -= 1) {
@@ -248,9 +203,6 @@ fn loadDocs(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !struct { docs:
     return .{ .docs = try docs.toOwnedSlice(gpa), .backing = backing };
 }
 
-// ============================================================================
-// Main: training + inference
-// ============================================================================
 pub fn main() !void {
     var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
@@ -262,7 +214,6 @@ pub fn main() !void {
 
     var rng = std.Random.Xoshiro256.init(42);
 
-    // Load data
     const loaded = try loadDocs(gpa, &rng);
     const docs = loaded.docs;
     defer gpa.free(docs);
@@ -271,18 +222,15 @@ pub fn main() !void {
 
     try stdout.print("vocab size: {d}\n", .{vocab_size});
 
-    // Initialize model
     var sd = try initStateDict(gpa, &rng);
     defer deinitStateDict(&sd);
     var params = flattenParams(&sd);
 
-    // Count total scalar parameters
     var total_params: usize = 0;
     for (&params) |p| total_params += p.numel();
     try stdout.print("num params: {d}\n", .{total_params});
     try stdout.flush();
 
-    // Adam buffers (one entry per scalar parameter element)
     const adam_m = try gpa.alloc(f32, total_params);
     defer gpa.free(adam_m);
     @memset(adam_m, 0);
@@ -294,22 +242,16 @@ pub fn main() !void {
     const beta2: f32 = 0.99;
     const eps_adam: f32 = 1e-8;
 
-    // Ensure all params have grad buffers (persistent, on GPA)
     for (&params) |p| try p.ensureGrad();
 
-    // Arena for tape and intermediate tensors
     var arena_impl = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_impl.deinit();
 
-    // Training loop
     const num_steps: usize = 1000;
     for (0..num_steps) |step| {
         const arena = arena_impl.allocator();
 
-        // Pick document
         const doc = docs[step % docs.len];
-
-        // Tokenize: BOS + chars + BOS
         const tokens = try arena.alloc(usize, doc.len + 2);
         tokens[0] = BOS;
         for (0..doc.len) |i| {
@@ -319,14 +261,11 @@ pub fn main() !void {
 
         const n = @min(block_size, tokens.len - 1);
 
-        // Zero param gradients
         for (&params) |p| p.zeroGrad();
 
-        // Create tape for this step
         var tape = Tape.init(arena);
         const reg = try registerWeights(&tape, &sd);
 
-        // Forward pass: accumulate loss across positions
         var kv = KVCache.init_cache();
         var total_loss_idx: ?usize = null;
 
@@ -344,15 +283,11 @@ pub fn main() !void {
             }
         }
 
-        // Average loss
         const avg_loss_idx = try tape.mulScalarOp(total_loss_idx.?, 1.0 / @as(f32, @floatFromInt(n)));
-
-        // Backward
         try tape.backward(avg_loss_idx);
 
         const loss_val = tape.get(avg_loss_idx).data[0];
 
-        // Adam update
         const lr_t = learning_rate * (1.0 - @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(num_steps)));
         const step_f: f32 = @floatFromInt(step + 1);
         var adam_idx: usize = 0;
@@ -371,15 +306,11 @@ pub fn main() !void {
         try stdout.print("step {d:4} / {d:4} | loss {d:.4}\n", .{ step + 1, num_steps, loss_val });
         if ((step + 1) % 100 == 0) try stdout.flush();
 
-        // Reset arena (frees tape + all intermediate tensors)
         _ = arena_impl.reset(.retain_capacity);
     }
 
     try stdout.flush();
 
-    // ========================================================================
-    // Inference
-    // ========================================================================
     const temperature: f32 = 0.5;
     try stdout.print("\n--- inference (new, hallucinated names) ---\n", .{});
     try stdout.flush();
@@ -397,12 +328,10 @@ pub fn main() !void {
         for (0..block_size) |pos_id| {
             const logits = try gpt(&tape, token_id, pos_id, &kv, &reg, arena);
 
-            // Apply temperature
             const scaled = try tape.mulScalarOp(logits, 1.0 / temperature);
             const probs_idx = try tape.softmaxOp(scaled);
             const probs = tape.get(probs_idx);
 
-            // Weighted random sampling
             token_id = weightedSample(&rng, probs.data[0..vocab_size]);
             if (token_id == BOS) break;
             if (name_len < block_size) {
