@@ -136,7 +136,6 @@ pub const Value = struct {
         var topo: std.ArrayList(*Value) = .empty;
         defer topo.deinit(alloc);
 
-        // Use a simple ArrayList-based visited set via pointer comparison
         var visited_list: std.ArrayList(*Value) = .empty;
         defer visited_list.deinit(alloc);
 

@@ -27,12 +27,8 @@ fn tokenToChar(token: usize) u8 {
 }
 
 // ============================================================================
-// PRNG: simple xoshiro256** seeded deterministically
+// PRNG
 // ============================================================================
-fn createRng(seed: u64) std.Random.Xoshiro256 {
-    return std.Random.Xoshiro256.init(seed);
-}
-
 fn gaussRandom(rng: *std.Random.Xoshiro256, std_dev: f64) f64 {
     // Box-Muller transform
     const r1 = rng.random().float(f64);
@@ -44,15 +40,13 @@ fn gaussRandom(rng: *std.Random.Xoshiro256, std_dev: f64) f64 {
 // ============================================================================
 // Weight matrices: stored as slices of *Value pointers
 // ============================================================================
-const Matrix = []const []*Value;
-
 fn initMatrix(
     gpa: std.mem.Allocator,
     rng: *std.Random.Xoshiro256,
     nout: usize,
     nin: usize,
     std_dev: f64,
-) ![][]* Value {
+) ![][]*Value {
     const rows = try gpa.alloc([]*Value, nout);
     for (0..nout) |i| {
         rows[i] = try gpa.alloc(*Value, nin);
@@ -100,29 +94,26 @@ fn initStateDict(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !StateDict
     return sd;
 }
 
+fn appendMatrixParams(list: *std.ArrayList(*Value), alloc: std.mem.Allocator, mat: [][]*Value) !void {
+    for (mat) |row| {
+        for (row) |v| {
+            try list.append(alloc, v);
+        }
+    }
+}
+
 fn flattenParams(gpa: std.mem.Allocator, sd: *const StateDict) ![]*Value {
     var list: std.ArrayList(*Value) = .empty;
-    // Helper to add all values from a matrix
-    const addMatrix = struct {
-        fn f(l: *std.ArrayList(*Value), a: std.mem.Allocator, mat: [][]*Value) !void {
-            for (mat) |row| {
-                for (row) |v| {
-                    try l.append(a, v);
-                }
-            }
-        }
-    }.f;
-
-    try addMatrix(&list, gpa, sd.wte);
-    try addMatrix(&list, gpa, sd.wpe);
-    try addMatrix(&list, gpa, sd.lm_head);
-    for (0..n_layer) |i| {
-        try addMatrix(&list, gpa, sd.layers[i].attn_wq);
-        try addMatrix(&list, gpa, sd.layers[i].attn_wk);
-        try addMatrix(&list, gpa, sd.layers[i].attn_wv);
-        try addMatrix(&list, gpa, sd.layers[i].attn_wo);
-        try addMatrix(&list, gpa, sd.layers[i].mlp_fc1);
-        try addMatrix(&list, gpa, sd.layers[i].mlp_fc2);
+    try appendMatrixParams(&list, gpa, sd.wte);
+    try appendMatrixParams(&list, gpa, sd.wpe);
+    try appendMatrixParams(&list, gpa, sd.lm_head);
+    for (&sd.layers) |*layer| {
+        try appendMatrixParams(&list, gpa, layer.attn_wq);
+        try appendMatrixParams(&list, gpa, layer.attn_wk);
+        try appendMatrixParams(&list, gpa, layer.attn_wv);
+        try appendMatrixParams(&list, gpa, layer.attn_wo);
+        try appendMatrixParams(&list, gpa, layer.mlp_fc1);
+        try appendMatrixParams(&list, gpa, layer.mlp_fc2);
     }
     return list.toOwnedSlice(gpa);
 }
@@ -136,25 +127,11 @@ const KVCache = struct {
 
     fn init() KVCache {
         var kv: KVCache = undefined;
-        for (0..n_layer) |i| {
-            kv.keys[i] = .empty;
-            kv.values[i] = .empty;
+        for (&kv.keys, &kv.values) |*k, *v| {
+            k.* = .empty;
+            v.* = .empty;
         }
         return kv;
-    }
-
-    fn deinit(self: *KVCache, alloc: std.mem.Allocator) void {
-        for (0..n_layer) |i| {
-            self.keys[i].deinit(alloc);
-            self.values[i].deinit(alloc);
-        }
-    }
-
-    fn reset(self: *KVCache) void {
-        for (0..n_layer) |i| {
-            self.keys[i].clearRetainingCapacity();
-            self.values[i].clearRetainingCapacity();
-        }
     }
 };
 
@@ -188,10 +165,9 @@ fn gpt(
         try kv.values[li].append(arena, v);
 
         var x_attn = try arena.alloc(*Value, n_embd);
-        const scale: f64 = 1.0 / @sqrt(@as(f64, @floatFromInt(head_dim)));
+        const scale: f64 = comptime 1.0 / @sqrt(@as(f64, @floatFromInt(head_dim)));
         for (0..n_head) |h| {
             const hs = h * head_dim;
-            // q_h = q[hs..hs+head_dim]
             const q_h = q[hs .. hs + head_dim];
             const n_cached = kv.keys[li].items.len;
 
@@ -240,8 +216,7 @@ fn gpt(
         }
     }
 
-    const logits = try zanogpt.linear(x, sd.lm_head, arena);
-    return logits;
+    return zanogpt.linear(x, sd.lm_head, arena);
 }
 
 // ============================================================================
@@ -287,7 +262,7 @@ pub fn main() !void {
     const stdout = &stdout_writer.interface;
 
     // PRNG
-    var rng = createRng(42);
+    var rng = std.Random.Xoshiro256.init(42);
 
     // Load data
     const loaded = try loadDocs(gpa, &rng);
