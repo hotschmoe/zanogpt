@@ -1,6 +1,7 @@
 const std = @import("std");
 const zanogpt = @import("zanogpt");
-const Value = zanogpt.Value;
+const Tensor = zanogpt.Tensor;
+const Tape = zanogpt.Tape;
 
 // ============================================================================
 // Hyperparameters (matching microgpt.py)
@@ -27,127 +28,136 @@ fn tokenToChar(token: usize) u8 {
 }
 
 // ============================================================================
-// PRNG
+// Weight initialization
 // ============================================================================
-fn gaussRandom(rng: *std.Random.Xoshiro256, std_dev: f64) f64 {
-    // Box-Muller transform
-    const r1 = rng.random().float(f64);
-    const r2 = rng.random().float(f64);
-    const z = @sqrt(-2.0 * @log(r1)) * @cos(2.0 * std.math.pi * r2);
-    return z * std_dev;
+fn initWeight(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256, shape: []const usize, std_dev: f32) !*Tensor {
+    const t = try Tensor.init(gpa, shape, true);
+    t.fillRandom(rng, std_dev);
+    return t;
 }
 
 // ============================================================================
-// Weight matrices: stored as slices of *Value pointers
-// ============================================================================
-fn initMatrix(
-    gpa: std.mem.Allocator,
-    rng: *std.Random.Xoshiro256,
-    nout: usize,
-    nin: usize,
-    std_dev: f64,
-) ![][]*Value {
-    const rows = try gpa.alloc([]*Value, nout);
-    for (0..nout) |i| {
-        rows[i] = try gpa.alloc(*Value, nin);
-        for (0..nin) |j| {
-            rows[i][j] = try Value.create(gpa, gaussRandom(rng, std_dev));
-        }
-    }
-    return rows;
-}
-
-fn freeMatrix(gpa: std.mem.Allocator, mat: [][]*Value) void {
-    for (mat) |row| {
-        for (row) |v| gpa.destroy(v);
-        gpa.free(row);
-    }
-    gpa.free(mat);
-}
-
-// ============================================================================
-// State dict: all model weight matrices
+// State dict: all model weight tensors
 // ============================================================================
 const LayerWeights = struct {
-    attn_wq: [][]*Value,
-    attn_wk: [][]*Value,
-    attn_wv: [][]*Value,
-    attn_wo: [][]*Value,
-    mlp_fc1: [][]*Value,
-    mlp_fc2: [][]*Value,
+    attn_wq: *Tensor, // [n_embd, n_embd]
+    attn_wk: *Tensor,
+    attn_wv: *Tensor,
+    attn_wo: *Tensor,
+    mlp_fc1: *Tensor, // [4*n_embd, n_embd]
+    mlp_fc2: *Tensor, // [n_embd, 4*n_embd]
 };
 
 const StateDict = struct {
-    wte: [][]*Value, // [vocab_size][n_embd]
-    wpe: [][]*Value, // [block_size][n_embd]
-    lm_head: [][]*Value, // [vocab_size][n_embd]
+    wte: *Tensor, // [vocab_size, n_embd]
+    wpe: *Tensor, // [block_size, n_embd]
+    lm_head: *Tensor, // [vocab_size, n_embd]
     layers: [n_layer]LayerWeights,
 };
 
 fn initStateDict(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !StateDict {
     var sd: StateDict = undefined;
-    sd.wte = try initMatrix(gpa, rng, vocab_size, n_embd, 0.08);
-    sd.wpe = try initMatrix(gpa, rng, block_size, n_embd, 0.08);
-    sd.lm_head = try initMatrix(gpa, rng, vocab_size, n_embd, 0.08);
+    sd.wte = try initWeight(gpa, rng, &.{ vocab_size, n_embd }, 0.08);
+    sd.wpe = try initWeight(gpa, rng, &.{ block_size, n_embd }, 0.08);
+    sd.lm_head = try initWeight(gpa, rng, &.{ vocab_size, n_embd }, 0.08);
     for (0..n_layer) |i| {
         sd.layers[i] = .{
-            .attn_wq = try initMatrix(gpa, rng, n_embd, n_embd, 0.08),
-            .attn_wk = try initMatrix(gpa, rng, n_embd, n_embd, 0.08),
-            .attn_wv = try initMatrix(gpa, rng, n_embd, n_embd, 0.08),
-            .attn_wo = try initMatrix(gpa, rng, n_embd, n_embd, 0.08),
-            .mlp_fc1 = try initMatrix(gpa, rng, 4 * n_embd, n_embd, 0.08),
-            .mlp_fc2 = try initMatrix(gpa, rng, n_embd, 4 * n_embd, 0.08),
+            .attn_wq = try initWeight(gpa, rng, &.{ n_embd, n_embd }, 0.08),
+            .attn_wk = try initWeight(gpa, rng, &.{ n_embd, n_embd }, 0.08),
+            .attn_wv = try initWeight(gpa, rng, &.{ n_embd, n_embd }, 0.08),
+            .attn_wo = try initWeight(gpa, rng, &.{ n_embd, n_embd }, 0.08),
+            .mlp_fc1 = try initWeight(gpa, rng, &.{ 4 * n_embd, n_embd }, 0.08),
+            .mlp_fc2 = try initWeight(gpa, rng, &.{ n_embd, 4 * n_embd }, 0.08),
         };
     }
     return sd;
 }
 
-fn deinitStateDict(gpa: std.mem.Allocator, sd: *StateDict) void {
-    freeMatrix(gpa, sd.wte);
-    freeMatrix(gpa, sd.wpe);
-    freeMatrix(gpa, sd.lm_head);
+fn deinitStateDict(sd: *StateDict) void {
+    sd.wte.deinit();
+    sd.wpe.deinit();
+    sd.lm_head.deinit();
     for (&sd.layers) |*layer| {
-        freeMatrix(gpa, layer.attn_wq);
-        freeMatrix(gpa, layer.attn_wk);
-        freeMatrix(gpa, layer.attn_wv);
-        freeMatrix(gpa, layer.attn_wo);
-        freeMatrix(gpa, layer.mlp_fc1);
-        freeMatrix(gpa, layer.mlp_fc2);
+        layer.attn_wq.deinit();
+        layer.attn_wk.deinit();
+        layer.attn_wv.deinit();
+        layer.attn_wo.deinit();
+        layer.mlp_fc1.deinit();
+        layer.mlp_fc2.deinit();
     }
 }
 
-fn appendMatrixParams(list: *std.ArrayList(*Value), alloc: std.mem.Allocator, mat: [][]*Value) !void {
-    for (mat) |row| {
-        for (row) |v| {
-            try list.append(alloc, v);
-        }
+// Registered tape indices for all weights
+const RegisteredLayerWeights = struct {
+    attn_wq: usize,
+    attn_wk: usize,
+    attn_wv: usize,
+    attn_wo: usize,
+    mlp_fc1: usize,
+    mlp_fc2: usize,
+};
+
+const RegisteredWeights = struct {
+    wte: usize,
+    wpe: usize,
+    lm_head: usize,
+    layers: [n_layer]RegisteredLayerWeights,
+};
+
+fn registerWeights(tape: *Tape, sd: *const StateDict) !RegisteredWeights {
+    var reg: RegisteredWeights = undefined;
+    reg.wte = try tape.register(sd.wte);
+    reg.wpe = try tape.register(sd.wpe);
+    reg.lm_head = try tape.register(sd.lm_head);
+    for (0..n_layer) |i| {
+        reg.layers[i] = .{
+            .attn_wq = try tape.register(sd.layers[i].attn_wq),
+            .attn_wk = try tape.register(sd.layers[i].attn_wk),
+            .attn_wv = try tape.register(sd.layers[i].attn_wv),
+            .attn_wo = try tape.register(sd.layers[i].attn_wo),
+            .mlp_fc1 = try tape.register(sd.layers[i].mlp_fc1),
+            .mlp_fc2 = try tape.register(sd.layers[i].mlp_fc2),
+        };
     }
+    return reg;
 }
 
-fn flattenParams(gpa: std.mem.Allocator, sd: *const StateDict) ![]*Value {
-    var list: std.ArrayList(*Value) = .empty;
-    try appendMatrixParams(&list, gpa, sd.wte);
-    try appendMatrixParams(&list, gpa, sd.wpe);
-    try appendMatrixParams(&list, gpa, sd.lm_head);
+const param_count = 3 + n_layer * 6;
+
+fn flattenParams(sd: *const StateDict) [param_count]*Tensor {
+    var params: [param_count]*Tensor = undefined;
+    var idx: usize = 0;
+    params[idx] = sd.wte;
+    idx += 1;
+    params[idx] = sd.wpe;
+    idx += 1;
+    params[idx] = sd.lm_head;
+    idx += 1;
     for (&sd.layers) |*layer| {
-        try appendMatrixParams(&list, gpa, layer.attn_wq);
-        try appendMatrixParams(&list, gpa, layer.attn_wk);
-        try appendMatrixParams(&list, gpa, layer.attn_wv);
-        try appendMatrixParams(&list, gpa, layer.attn_wo);
-        try appendMatrixParams(&list, gpa, layer.mlp_fc1);
-        try appendMatrixParams(&list, gpa, layer.mlp_fc2);
+        params[idx] = layer.attn_wq;
+        idx += 1;
+        params[idx] = layer.attn_wk;
+        idx += 1;
+        params[idx] = layer.attn_wv;
+        idx += 1;
+        params[idx] = layer.attn_wo;
+        idx += 1;
+        params[idx] = layer.mlp_fc1;
+        idx += 1;
+        params[idx] = layer.mlp_fc2;
+        idx += 1;
     }
-    return list.toOwnedSlice(gpa);
+    return params;
 }
 
 // ============================================================================
-// KV Cache
+// KV Cache (stores tape indices)
 // ============================================================================
 const KVCache = struct {
-    keys: [n_layer]std.ArrayList([]*Value),
-    values: [n_layer]std.ArrayList([]*Value),
+    keys: [n_layer]std.ArrayList(usize),
+    values: [n_layer]std.ArrayList(usize),
 
-    fn init() KVCache {
+    fn init_cache() KVCache {
         var kv: KVCache = undefined;
         for (&kv.keys, &kv.values) |*k, *v| {
             k.* = .empty;
@@ -161,91 +171,59 @@ const KVCache = struct {
 // GPT forward pass
 // ============================================================================
 fn gpt(
+    tape: *Tape,
     token_id: usize,
     pos_id: usize,
     kv: *KVCache,
-    sd: *const StateDict,
+    reg: *const RegisteredWeights,
     arena: std.mem.Allocator,
-) ![]*Value {
+) !usize {
     // Token + position embedding
-    var x = try arena.alloc(*Value, n_embd);
-    for (0..n_embd) |j| {
-        x[j] = try sd.wte[token_id][j].add(sd.wpe[pos_id][j], arena);
-    }
-    x = try zanogpt.rmsnorm(x, arena);
+    const tok_emb = try tape.embeddingLookup(reg.wte, token_id);
+    const pos_emb = try tape.embeddingLookup(reg.wpe, pos_id);
+    var x = try tape.addOp(tok_emb, pos_emb);
+    x = try tape.rmsnormOp(x);
 
     for (0..n_layer) |li| {
-        const layer = &sd.layers[li];
+        const layer = &reg.layers[li];
 
         // 1) Multi-head attention
         const x_residual = x;
-        x = try zanogpt.rmsnorm(x, arena);
-        const q = try zanogpt.linear(x, layer.attn_wq, arena);
-        const k = try zanogpt.linear(x, layer.attn_wk, arena);
-        const v = try zanogpt.linear(x, layer.attn_wv, arena);
+        x = try tape.rmsnormOp(x);
+        const q = try tape.matmulOp(layer.attn_wq, x);
+        const k = try tape.matmulOp(layer.attn_wk, x);
+        const v = try tape.matmulOp(layer.attn_wv, x);
+
         try kv.keys[li].append(arena, k);
         try kv.values[li].append(arena, v);
 
-        var x_attn = try arena.alloc(*Value, n_embd);
-        const scale: f64 = comptime 1.0 / @sqrt(@as(f64, @floatFromInt(head_dim)));
-        for (0..n_head) |h| {
-            const hs = h * head_dim;
-            const q_h = q[hs .. hs + head_dim];
-            const n_cached = kv.keys[li].items.len;
+        const attn_out = try tape.attentionOp(
+            q,
+            kv.keys[li].items,
+            kv.values[li].items,
+            n_head,
+            head_dim,
+        );
 
-            // Compute attention logits
-            const attn_logits = try arena.alloc(*Value, n_cached);
-            for (0..n_cached) |t| {
-                const k_t = kv.keys[li].items[t];
-                // dot product q_h . k_t_h
-                var dot = try q_h[0].mul(k_t[hs], arena);
-                for (1..head_dim) |jj| {
-                    const prod = try q_h[jj].mul(k_t[hs + jj], arena);
-                    dot = try dot.add(prod, arena);
-                }
-                attn_logits[t] = try dot.mulScalar(scale, arena);
-            }
-            const attn_weights = try zanogpt.softmax(attn_logits, arena);
-
-            // Weighted sum of values
-            for (0..head_dim) |jj| {
-                // head_out[jj] = sum_t attn_weights[t] * v_t[hs+jj]
-                var acc = try attn_weights[0].mul(kv.values[li].items[0][hs + jj], arena);
-                for (1..n_cached) |t| {
-                    const prod = try attn_weights[t].mul(kv.values[li].items[t][hs + jj], arena);
-                    acc = try acc.add(prod, arena);
-                }
-                x_attn[hs + jj] = acc;
-            }
-        }
-        x = try zanogpt.linear(x_attn, layer.attn_wo, arena);
-        // Residual connection
-        for (0..n_embd) |j| {
-            x[j] = try x[j].add(x_residual[j], arena);
-        }
+        x = try tape.matmulOp(layer.attn_wo, attn_out);
+        x = try tape.addOp(x, x_residual);
 
         // 2) MLP block
         const x_residual2 = x;
-        x = try zanogpt.rmsnorm(x, arena);
-        var hidden = try zanogpt.linear(x, layer.mlp_fc1, arena);
-        for (0..hidden.len) |j| {
-            hidden[j] = try hidden[j].relu(arena);
-        }
-        x = try zanogpt.linear(hidden, layer.mlp_fc2, arena);
-        // Residual connection
-        for (0..n_embd) |j| {
-            x[j] = try x[j].add(x_residual2[j], arena);
-        }
+        x = try tape.rmsnormOp(x);
+        var hidden = try tape.matmulOp(layer.mlp_fc1, x);
+        hidden = try tape.reluOp(hidden);
+        x = try tape.matmulOp(layer.mlp_fc2, hidden);
+        x = try tape.addOp(x, x_residual2);
     }
 
-    return zanogpt.linear(x, sd.lm_head, arena);
+    return tape.matmulOp(reg.lm_head, x);
 }
 
 // ============================================================================
 // Data loading
 // ============================================================================
 fn loadDocs(gpa: std.mem.Allocator, rng: *std.Random.Xoshiro256) !struct { docs: [][]const u8, backing: []u8 } {
-    // Read file at runtime
     const file = try std.fs.cwd().openFile("data/names.txt", .{});
     defer file.close();
     const backing = try file.readToEndAlloc(gpa, 1024 * 1024);
@@ -278,12 +256,10 @@ pub fn main() !void {
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
 
-    // Use buffered writer for stdout
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &stdout_writer.interface;
 
-    // PRNG
     var rng = std.Random.Xoshiro256.init(42);
 
     // Load data
@@ -297,25 +273,31 @@ pub fn main() !void {
 
     // Initialize model
     var sd = try initStateDict(gpa, &rng);
-    defer deinitStateDict(gpa, &sd);
-    const params = try flattenParams(gpa, &sd);
-    defer gpa.free(params);
-    try stdout.print("num params: {d}\n", .{params.len});
+    defer deinitStateDict(&sd);
+    var params = flattenParams(&sd);
+
+    // Count total scalar parameters
+    var total_params: usize = 0;
+    for (&params) |p| total_params += p.numel();
+    try stdout.print("num params: {d}\n", .{total_params});
     try stdout.flush();
 
-    // Adam buffers
-    const adam_m = try gpa.alloc(f64, params.len);
+    // Adam buffers (one entry per scalar parameter element)
+    const adam_m = try gpa.alloc(f32, total_params);
     defer gpa.free(adam_m);
-    @memset(adam_m, 0.0);
-    const adam_v = try gpa.alloc(f64, params.len);
+    @memset(adam_m, 0);
+    const adam_v = try gpa.alloc(f32, total_params);
     defer gpa.free(adam_v);
-    @memset(adam_v, 0.0);
-    const learning_rate: f64 = 0.01;
-    const beta1: f64 = 0.85;
-    const beta2: f64 = 0.99;
-    const eps_adam: f64 = 1e-8;
+    @memset(adam_v, 0);
+    const learning_rate: f32 = 0.01;
+    const beta1: f32 = 0.85;
+    const beta2: f32 = 0.99;
+    const eps_adam: f32 = 1e-8;
 
-    // Arena for intermediate computation graph values
+    // Ensure all params have grad buffers (persistent, on GPA)
+    for (&params) |p| try p.ensureGrad();
+
+    // Arena for tape and intermediate tensors
     var arena_impl = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_impl.deinit();
 
@@ -337,45 +319,59 @@ pub fn main() !void {
 
         const n = @min(block_size, tokens.len - 1);
 
-        // Forward pass: accumulate losses
-        var kv = KVCache.init();
-        var losses = try arena.alloc(*Value, n);
+        // Zero param gradients
+        for (&params) |p| p.zeroGrad();
+
+        // Create tape for this step
+        var tape = Tape.init(arena);
+        const reg = try registerWeights(&tape, &sd);
+
+        // Forward pass: accumulate loss across positions
+        var kv = KVCache.init_cache();
+        var total_loss_idx: ?usize = null;
+
         for (0..n) |pos_id| {
             const token_id = tokens[pos_id];
             const target_id = tokens[pos_id + 1];
-            const logits = try gpt(token_id, pos_id, &kv, &sd, arena);
-            const probs = try zanogpt.softmax(logits, arena);
-            const neg_log = try probs[target_id].log(arena);
-            losses[pos_id] = try neg_log.mulScalar(-1.0, arena);
+            const logits = try gpt(&tape, token_id, pos_id, &kv, &reg, arena);
+            const probs_idx = try tape.softmaxOp(logits);
+            const loss_pos = try tape.nllLoss(probs_idx, target_id);
+
+            if (total_loss_idx) |tl| {
+                total_loss_idx = try tape.addOp(tl, loss_pos);
+            } else {
+                total_loss_idx = loss_pos;
+            }
         }
 
         // Average loss
-        var total_loss = losses[0];
-        for (1..n) |i| {
-            total_loss = try total_loss.add(losses[i], arena);
-        }
-        const loss = try total_loss.mulScalar(1.0 / @as(f64, @floatFromInt(n)), arena);
+        const avg_loss_idx = try tape.mulScalarOp(total_loss_idx.?, 1.0 / @as(f32, @floatFromInt(n)));
 
         // Backward
-        try loss.backward(gpa);
+        try tape.backward(avg_loss_idx);
+
+        const loss_val = tape.get(avg_loss_idx).data[0];
 
         // Adam update
-        const lr_t = learning_rate * (1.0 - @as(f64, @floatFromInt(step)) / @as(f64, @floatFromInt(num_steps)));
-        const step_f: f64 = @floatFromInt(step + 1);
-        for (0..params.len) |i| {
-            const g = params[i].grad;
-            adam_m[i] = beta1 * adam_m[i] + (1.0 - beta1) * g;
-            adam_v[i] = beta2 * adam_v[i] + (1.0 - beta2) * g * g;
-            const m_hat = adam_m[i] / (1.0 - std.math.pow(f64, beta1, step_f));
-            const v_hat = adam_v[i] / (1.0 - std.math.pow(f64, beta2, step_f));
-            params[i].data -= lr_t * m_hat / (@sqrt(v_hat) + eps_adam);
-            params[i].grad = 0;
+        const lr_t = learning_rate * (1.0 - @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(num_steps)));
+        const step_f: f32 = @floatFromInt(step + 1);
+        var adam_idx: usize = 0;
+        for (&params) |p| {
+            const g = p.grad.?;
+            for (0..p.numel()) |j| {
+                adam_m[adam_idx] = beta1 * adam_m[adam_idx] + (1.0 - beta1) * g[j];
+                adam_v[adam_idx] = beta2 * adam_v[adam_idx] + (1.0 - beta2) * g[j] * g[j];
+                const m_hat = adam_m[adam_idx] / (1.0 - std.math.pow(f32, beta1, step_f));
+                const v_hat = adam_v[adam_idx] / (1.0 - std.math.pow(f32, beta2, step_f));
+                p.data[j] -= lr_t * m_hat / (@sqrt(v_hat) + eps_adam);
+                adam_idx += 1;
+            }
         }
 
-        try stdout.print("step {d:4} / {d:4} | loss {d:.4}\n", .{ step + 1, num_steps, loss.data });
+        try stdout.print("step {d:4} / {d:4} | loss {d:.4}\n", .{ step + 1, num_steps, loss_val });
         if ((step + 1) % 100 == 0) try stdout.flush();
 
-        // Reset arena for next step (free all intermediate Values)
+        // Reset arena (frees tape + all intermediate tensors)
         _ = arena_impl.reset(.retain_capacity);
     }
 
@@ -384,34 +380,30 @@ pub fn main() !void {
     // ========================================================================
     // Inference
     // ========================================================================
-    const temperature: f64 = 0.5;
+    const temperature: f32 = 0.5;
     try stdout.print("\n--- inference (new, hallucinated names) ---\n", .{});
     try stdout.flush();
 
     for (0..20) |sample_idx| {
         _ = arena_impl.reset(.retain_capacity);
         const arena = arena_impl.allocator();
-        var kv = KVCache.init();
+        var tape = Tape.init(arena);
+        const reg = try registerWeights(&tape, &sd);
+        var kv = KVCache.init_cache();
         var token_id: usize = BOS;
         var name_buf: [block_size]u8 = undefined;
         var name_len: usize = 0;
 
         for (0..block_size) |pos_id| {
-            const logits = try gpt(token_id, pos_id, &kv, &sd, arena);
+            const logits = try gpt(&tape, token_id, pos_id, &kv, &reg, arena);
 
             // Apply temperature
-            const scaled = try arena.alloc(*Value, logits.len);
-            for (0..logits.len) |j| {
-                scaled[j] = try logits[j].mulScalar(1.0 / temperature, arena);
-            }
-            const probs = try zanogpt.softmax(scaled, arena);
+            const scaled = try tape.mulScalarOp(logits, 1.0 / temperature);
+            const probs_idx = try tape.softmaxOp(scaled);
+            const probs = tape.get(probs_idx);
 
             // Weighted random sampling
-            const weights = try arena.alloc(f64, vocab_size);
-            for (0..vocab_size) |j| {
-                weights[j] = probs[j].data;
-            }
-            token_id = weightedSample(&rng, weights);
+            token_id = weightedSample(&rng, probs.data[0..vocab_size]);
             if (token_id == BOS) break;
             if (name_len < block_size) {
                 name_buf[name_len] = tokenToChar(token_id);
@@ -423,10 +415,10 @@ pub fn main() !void {
     try stdout.flush();
 }
 
-fn weightedSample(rng: *std.Random.Xoshiro256, weights: []const f64) usize {
-    var total: f64 = 0;
+fn weightedSample(rng: *std.Random.Xoshiro256, weights: []const f32) usize {
+    var total: f32 = 0;
     for (weights) |w| total += w;
-    var r = rng.random().float(f64) * total;
+    var r = rng.random().float(f32) * total;
     for (weights, 0..) |w, i| {
         r -= w;
         if (r <= 0) return i;
