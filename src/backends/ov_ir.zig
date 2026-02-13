@@ -29,12 +29,12 @@ pub fn reluBlob(N: usize) BlobBuf {
 /// Build flags for the NPU compiler (input/output precisions and layouts).
 /// Parameter names must match the layer names in the XML templates.
 pub const unary_build_flags: [*:0]const u8 =
-    "--inputs_precisions=\"input:fp32\" --inputs_layouts=\"input:C\" " ++
-    "--outputs_precisions=\"result:fp32\" --outputs_layouts=\"result:C\"";
+    "--inputs_precisions=\"input:FP32\" --inputs_layouts=\"input:C\" " ++
+    "--outputs_precisions=\"result:FP32\" --outputs_layouts=\"result:C\"";
 
 pub const matmul_build_flags: [*:0]const u8 =
-    "--inputs_precisions=\"W:fp32 x:fp32\" --inputs_layouts=\"W:NC x:C\" " ++
-    "--outputs_precisions=\"result:fp32\" --outputs_layouts=\"result:C\"";
+    "--inputs_precisions=\"W:FP32 x:FP32\" --inputs_layouts=\"W:NC x:C\" " ++
+    "--outputs_precisions=\"result:FP32\" --outputs_layouts=\"result:C\"";
 
 /// Format an XML template with args into a BlobBuf.
 /// Blob format: [u64 LE xml_len][xml_bytes][u64 LE weights_len][weights_bytes]
@@ -92,7 +92,7 @@ const softmax_xml_template =
     \\<data shape="{d}" element_type="f32"/>
     \\<output><port id="0" precision="FP32"><dim>{d}</dim></port></output>
     \\</layer>
-    \\<layer id="1" name="sm" type="SoftMax" version="opset1">
+    \\<layer id="1" name="sm" type="Softmax" version="opset1">
     \\<data axis="0"/>
     \\<input><port id="0"><dim>{d}</dim></port></input>
     \\<output><port id="1" precision="FP32"><dim>{d}</dim></port></output>
@@ -116,7 +116,7 @@ const relu_xml_template =
     \\<data shape="{d}" element_type="f32"/>
     \\<output><port id="0" precision="FP32"><dim>{d}</dim></port></output>
     \\</layer>
-    \\<layer id="1" name="r" type="ReLU" version="opset1">
+    \\<layer id="1" name="r" type="Relu" version="opset1">
     \\<input><port id="0"><dim>{d}</dim></port></input>
     \\<output><port id="1" precision="FP32"><dim>{d}</dim></port></output>
     \\</layer>
@@ -153,10 +153,10 @@ test "matmulBlob produces valid blob" {
 
 test "softmaxBlob produces valid blob" {
     const blob = softmaxBlob(16);
-    try expectValidBlob(&blob, "SoftMax");
+    try expectValidBlob(&blob, "Softmax");
 }
 
 test "reluBlob produces valid blob" {
     const blob = reluBlob(4);
-    try expectValidBlob(&blob, "ReLU");
+    try expectValidBlob(&blob, "Relu");
 }

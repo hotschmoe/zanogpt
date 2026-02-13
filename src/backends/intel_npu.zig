@@ -297,9 +297,13 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
     };
 
     // Compile graph — try pfnCreate2 (v1.5) first, fall back to pfnCreate (v1.0)
-    log.info("compiling graph: op={s} dims=[{d},{d},{d},{d}] blob_len={d}", .{
-        @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3], blob.len,
+    const xml_len = std.mem.readInt(u64, blob.data[0..8], .little);
+    log.info("compiling graph: op={s} dims=[{d},{d},{d},{d}] blob_len={d} xml_len={d}", .{
+        @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3], blob.len, xml_len,
     });
+    // Log first 200 chars of XML for diagnostics
+    const xml_preview_len = @min(xml_len, 200);
+    log.info("XML preview: {s}", .{blob.data[8..][0..xml_preview_len]});
 
     var graph: ze.ze_graph_handle_t = undefined;
 
