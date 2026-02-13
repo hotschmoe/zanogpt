@@ -158,11 +158,18 @@ pub fn init() !void {
     var dev_graph_props: ze.ze_device_graph_properties_t = .{};
     try ze.check(graph_ddi.?.pfnDeviceGetGraphProperties(device.?, &dev_graph_props));
     compiler_ver = dev_graph_props.compilerVersion;
-    log.info("NPU compiler version: {d}.{d}, max opset: {d}", .{
+    log.info("NPU compiler version: {d}.{d}, max opset: {d}, formats: 0x{x}, ext ver: 0x{x}", .{
         compiler_ver.major,
         compiler_ver.minor,
         dev_graph_props.maxOVOpsetVersionSupported,
+        dev_graph_props.graphFormatsSupported,
+        dev_graph_props.graphExtensionVersion,
     });
+    if (graph_ddi.?.pfnCreate2) |_| {
+        log.info("pfnCreate2 (v1.5) available", .{});
+    } else {
+        log.info("pfnCreate2 (v1.5) NOT available, using pfnCreate (v1.0)", .{});
+    }
 
     // 11. Create reusable command list
     const cl_desc: ze.ze_command_list_desc_t = .{};
@@ -192,6 +199,7 @@ fn smokeTest() !void {
         .{ .op = .relu, .dims = .{ 4, 0, 0, 0 } },
         &.{ 4 * @sizeOf(f32), 4 * @sizeOf(f32) },
         2,
+        ov_ir.unary_build_flags,
     );
 
     const test_input = [_]f32{ -1.0, 0.0, 2.0, -3.0 };
@@ -265,7 +273,7 @@ pub fn deinit() void {
 
 // ── Graph compilation and execution ──
 
-fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected: u32) !*CachedGraph {
+fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected: u32, build_flags: [*:0]const u8) !*CachedGraph {
     // Linear scan for cache hit
     for (&cached_graphs) |*entry| {
         if (entry.occupied and std.meta.eql(entry.key, key)) {
@@ -288,15 +296,52 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
         .relu => ov_ir.reluBlob(key.dims[0]),
     };
 
-    // Compile graph
-    const desc: ze.ze_graph_desc_t = .{
-        .format = .NGRAPH_LITE,
-        .inputSize = blob.len,
-        .pInput = &blob.data,
-        .compilerVersion = compiler_ver,
-    };
+    // Compile graph — try pfnCreate2 (v1.5) first, fall back to pfnCreate (v1.0)
+    log.info("compiling graph: op={s} dims=[{d},{d},{d},{d}] blob_len={d}", .{
+        @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3], blob.len,
+    });
+
     var graph: ze.ze_graph_handle_t = undefined;
-    try ze.check(ddi.pfnCreate(context.?, device.?, &desc, &graph));
+
+    if (ddi.pfnCreate2) |create2| {
+        const desc2: ze.ze_graph_desc_2_t = .{
+            .format = .NGRAPH_LITE,
+            .inputSize = blob.len,
+            .pInput = &blob.data,
+            .pBuildFlags = build_flags,
+            .flags = 0,
+        };
+        const result2 = create2(context.?, device.?, &desc2, &graph);
+        if (result2 != .SUCCESS) {
+            log.warn("pfnCreate2 failed (0x{x}), trying pfnCreate", .{@intFromEnum(result2)});
+        } else {
+            log.info("pfnCreate2 succeeded", .{});
+        }
+        if (result2 == .SUCCESS) {} else {
+            // Fall through to pfnCreate
+            const desc: ze.ze_graph_desc_t = .{
+                .format = .NGRAPH_LITE,
+                .inputSize = blob.len,
+                .pInput = &blob.data,
+                .pBuildFlags = build_flags,
+                .compilerVersion = compiler_ver,
+            };
+            const result1 = ddi.pfnCreate(context.?, device.?, &desc, &graph);
+            if (result1 != .SUCCESS) {
+                log.err("pfnCreate also failed (0x{x})", .{@intFromEnum(result1)});
+                try ze.check(result1);
+            }
+        }
+    } else {
+        const desc: ze.ze_graph_desc_t = .{
+            .format = .NGRAPH_LITE,
+            .inputSize = blob.len,
+            .pInput = &blob.data,
+            .pBuildFlags = build_flags,
+            .compilerVersion = compiler_ver,
+        };
+        try ze.check(ddi.pfnCreate(context.?, device.?, &desc, &graph));
+    }
     log.info("compiled graph: op={s} dims=[{d},{d},{d},{d}]", .{
         @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3],
     });
@@ -378,6 +423,7 @@ pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize
         .{ .op = .matmul, .dims = .{ @intCast(M), @intCast(K), 0, 0 } },
         &.{ M * K * @sizeOf(f32), K * @sizeOf(f32), M * @sizeOf(f32) },
         3,
+        ov_ir.matmul_build_flags,
     ) catch @panic("NPU matmul graph compilation failed");
 
     // Copy W → shared mem (arg 0)
@@ -410,6 +456,7 @@ fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize) v
         .{ .op = op, .dims = .{ @intCast(n), 0, 0, 0 } },
         &.{ size, size },
         2,
+        ov_ir.unary_build_flags,
     ) catch @panic("NPU unary graph compilation failed");
 
     @memcpy(cached.arg_bufs[0].asF32Slice()[0..n], input[0..n]);

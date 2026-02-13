@@ -149,7 +149,7 @@ pub const ze_graph_compiler_version_info_t = extern struct {
 };
 
 pub const ze_device_graph_properties_t = extern struct {
-    stype: u32 = 0x4,
+    stype: u32 = 0x1, // ZE_STRUCTURE_TYPE_DEVICE_GRAPH_PROPERTIES
     pNext: ?*anyopaque = null,
     graphExtensionVersion: u32 = 0,
     compilerVersion: ze_graph_compiler_version_info_t = .{},
@@ -158,13 +158,24 @@ pub const ze_device_graph_properties_t = extern struct {
 };
 
 pub const ze_graph_desc_t = extern struct {
-    stype: u32 = 0x2,
+    stype: u32 = 0x2, // ZE_STRUCTURE_TYPE_GRAPH_DESC_PROPERTIES
     pNext: ?*anyopaque = null,
     format: ze_graph_format_t = .NGRAPH_LITE,
     inputSize: usize = 0,
     pInput: ?[*]const u8 = null,
     pBuildFlags: ?[*:0]const u8 = null,
     compilerVersion: ze_graph_compiler_version_info_t = .{},
+};
+
+/// Version 1.5 graph descriptor — replaces compilerVersion with flags.
+pub const ze_graph_desc_2_t = extern struct {
+    stype: u32 = 0x2,
+    pNext: ?*anyopaque = null,
+    format: ze_graph_format_t = .NGRAPH_LITE,
+    inputSize: usize = 0,
+    pInput: ?[*]const u8 = null,
+    pBuildFlags: ?[*:0]const u8 = null,
+    flags: u32 = 0, // ZE_GRAPH_FLAG_NONE
 };
 
 pub const ze_graph_properties_t = extern struct {
@@ -175,7 +186,9 @@ pub const ze_graph_properties_t = extern struct {
 
 // ── Graph DDI table (Level-Zero graph extension v1.0) ──
 
+/// Graph extension DDI table. v1.0 fields (indices 0-8) plus stubs up to v1.5 pfnCreate2 (index 16).
 pub const ze_graph_dditable_t = extern struct {
+    // ── Version 1.0 (9 function pointers) ──
     pfnCreate: *const fn (ze_context_handle_t, ze_device_handle_t, *const ze_graph_desc_t, *ze_graph_handle_t) callconv(.c) ze_result_t,
     pfnDestroy: *const fn (ze_graph_handle_t) callconv(.c) ze_result_t,
     pfnGetProperties: *const fn (ze_graph_handle_t, *ze_graph_properties_t) callconv(.c) ze_result_t,
@@ -185,6 +198,21 @@ pub const ze_graph_dditable_t = extern struct {
     pfnAppendGraphExecute: *const fn (ze_command_list_handle_t, ze_graph_handle_t, ?*anyopaque, ?ze_event_handle_t, u32, ?[*]ze_event_handle_t) callconv(.c) ze_result_t,
     pfnGetNativeBinary: *const fn (ze_graph_handle_t, *usize, ?[*]u8) callconv(.c) ze_result_t,
     pfnDeviceGetGraphProperties: *const fn (ze_device_handle_t, *ze_device_graph_properties_t) callconv(.c) ze_result_t,
+    // ── Version 1.1 (2 function pointers) ──
+    _reserved_v1_1a: ?*anyopaque = null,
+    _reserved_v1_1b: ?*anyopaque = null,
+    // ── Version 1.2 (1 function pointer) ──
+    _reserved_v1_2: ?*anyopaque = null,
+    // ── Version 1.3 (3 function pointers) ──
+    _reserved_v1_3a: ?*anyopaque = null,
+    _reserved_v1_3b: ?*anyopaque = null,
+    _reserved_v1_3c: ?*anyopaque = null,
+    // ── Version 1.4 (1 function pointer) ──
+    pfnBuildLogGetString: ?*const fn (ze_graph_handle_t, *u32, ?[*]u8) callconv(.c) ze_result_t = null,
+    // ── Version 1.5 (3 function pointers) ──
+    pfnCreate2: ?*const fn (ze_context_handle_t, ze_device_handle_t, *const ze_graph_desc_2_t, *ze_graph_handle_t) callconv(.c) ze_result_t = null,
+    _reserved_v1_5b: ?*anyopaque = null,
+    _reserved_v1_5c: ?*anyopaque = null,
 };
 
 // ── Function pointer types ──

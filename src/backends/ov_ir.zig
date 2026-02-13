@@ -26,14 +26,30 @@ pub fn reluBlob(N: usize) BlobBuf {
     return makeBlob(relu_xml_template, .{ N, N, N, N, N });
 }
 
-/// Format an XML template with args into a BlobBuf with an 8-byte LE length header.
+/// Build flags for the NPU compiler (input/output precisions and layouts).
+/// Parameter names must match the layer names in the XML templates.
+pub const unary_build_flags: [*:0]const u8 =
+    "--inputs_precisions=\"input:fp32\" --inputs_layouts=\"input:C\" " ++
+    "--outputs_precisions=\"result:fp32\" --outputs_layouts=\"result:C\"";
+
+pub const matmul_build_flags: [*:0]const u8 =
+    "--inputs_precisions=\"W:fp32 x:fp32\" --inputs_layouts=\"W:NC x:C\" " ++
+    "--outputs_precisions=\"result:fp32\" --outputs_layouts=\"result:C\"";
+
+/// Format an XML template with args into a BlobBuf.
+/// Blob format: [u64 LE xml_len][xml_bytes][u64 LE weights_len][weights_bytes]
+/// For parameter-only ops (no constants), weights_len is 0.
 fn makeBlob(comptime template: []const u8, args: anytype) BlobBuf {
     var buf = BlobBuf{};
     const xml = std.fmt.bufPrint(buf.data[8..], template, args) catch
         @panic("IR XML exceeded BlobBuf capacity");
     const xml_len: u64 = @intCast(xml.len);
     @memcpy(buf.data[0..8], std.mem.asBytes(&xml_len));
-    buf.len = 8 + xml.len;
+    // Append empty weights section (8 bytes of zeros)
+    const weights_offset = 8 + xml.len;
+    const zero_weights: u64 = 0;
+    @memcpy(buf.data[weights_offset..][0..8], std.mem.asBytes(&zero_weights));
+    buf.len = weights_offset + 8;
     return buf;
 }
 
@@ -118,12 +134,16 @@ const relu_xml_template =
 // ── Tests ──
 
 fn expectValidBlob(blob: *const BlobBuf, expected_op: []const u8) !void {
-    try std.testing.expect(blob.len > 8);
+    // Blob format: [u64 xml_len][xml][u64 weights_len][weights]
+    try std.testing.expect(blob.len > 16);
     const xml_len = std.mem.readInt(u64, blob.data[0..8], .little);
-    try std.testing.expectEqual(blob.len - 8, xml_len);
-    const xml = blob.data[8..blob.len];
+    const xml = blob.data[8..][0..xml_len];
     try std.testing.expect(std.mem.startsWith(u8, xml, "<?xml"));
     try std.testing.expect(std.mem.indexOf(u8, xml, expected_op) != null);
+    // Weights section follows XML
+    const weights_len = std.mem.readInt(u64, blob.data[8 + xml_len ..][0..8], .little);
+    try std.testing.expectEqual(@as(u64, 0), weights_len);
+    try std.testing.expectEqual(8 + xml_len + 8, blob.len);
 }
 
 test "matmulBlob produces valid blob" {
