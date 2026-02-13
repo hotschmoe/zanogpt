@@ -6,6 +6,10 @@ pub const ze_driver_handle_t = *opaque {};
 pub const ze_device_handle_t = *opaque {};
 pub const ze_context_handle_t = *opaque {};
 pub const ze_command_queue_handle_t = *opaque {};
+pub const ze_command_list_handle_t = *opaque {};
+pub const ze_fence_handle_t = *opaque {};
+pub const ze_graph_handle_t = *opaque {};
+pub const ze_event_handle_t = *opaque {};
 
 // ── Enums ──
 
@@ -38,6 +42,10 @@ pub const ze_structure_type_t = enum(u32) {
     DEVICE_PROPERTIES = 0x00010002,
     CONTEXT_DESC = 0x0002000E,
     COMMAND_QUEUE_DESC = 0x00030001,
+    COMMAND_LIST_DESC = 0x00030002,
+    FENCE_DESC = 0x00030003,
+    DEVICE_MEM_ALLOC_DESC = 0x00040001,
+    HOST_MEM_ALLOC_DESC = 0x00040002,
     _,
 };
 
@@ -55,10 +63,17 @@ pub const ze_command_queue_priority_t = enum(u32) {
     _,
 };
 
+pub const ze_graph_format_t = enum(u32) {
+    NATIVE = 0x1,
+    NGRAPH_LITE = 0x2,
+    _,
+};
+
 // ── Constants ──
 
 pub const ZE_INIT_FLAG_VPU_ONLY: u32 = 1 << 1;
 pub const ZE_MAX_DEVICE_NAME = 256;
+pub const MAX_U64: u64 = std.math.maxInt(u64);
 
 // ── Extern structs (C ABI layout) ──
 
@@ -102,6 +117,76 @@ pub const ze_command_queue_desc_t = extern struct {
     priority: ze_command_queue_priority_t = .NORMAL,
 };
 
+pub const ze_command_list_desc_t = extern struct {
+    stype: ze_structure_type_t = .COMMAND_LIST_DESC,
+    pNext: ?*anyopaque = null,
+    commandQueueGroupOrdinal: u32 = 0,
+    flags: u32 = 0,
+};
+
+pub const ze_fence_desc_t = extern struct {
+    stype: ze_structure_type_t = .FENCE_DESC,
+    pNext: ?*anyopaque = null,
+    flags: u32 = 0,
+};
+
+pub const ze_device_mem_alloc_desc_t = extern struct {
+    stype: ze_structure_type_t = .DEVICE_MEM_ALLOC_DESC,
+    pNext: ?*anyopaque = null,
+    flags: u32 = 0,
+    ordinal: u32 = 0,
+};
+
+pub const ze_host_mem_alloc_desc_t = extern struct {
+    stype: ze_structure_type_t = .HOST_MEM_ALLOC_DESC,
+    pNext: ?*anyopaque = null,
+    flags: u32 = 0,
+};
+
+pub const ze_graph_compiler_version_info_t = extern struct {
+    major: u16 = 0,
+    minor: u16 = 0,
+};
+
+pub const ze_device_graph_properties_t = extern struct {
+    stype: u32 = 0x4,
+    pNext: ?*anyopaque = null,
+    graphExtensionVersion: u32 = 0,
+    compilerVersion: ze_graph_compiler_version_info_t = .{},
+    graphFormatsSupported: u32 = 0,
+    maxOVOpsetVersionSupported: u32 = 0,
+};
+
+pub const ze_graph_desc_t = extern struct {
+    stype: u32 = 0x2,
+    pNext: ?*anyopaque = null,
+    format: ze_graph_format_t = .NGRAPH_LITE,
+    inputSize: usize = 0,
+    pInput: ?[*]const u8 = null,
+    pBuildFlags: ?[*:0]const u8 = null,
+    compilerVersion: ze_graph_compiler_version_info_t = .{},
+};
+
+pub const ze_graph_properties_t = extern struct {
+    stype: u32 = 0x3,
+    pNext: ?*anyopaque = null,
+    numGraphArgs: u32 = 0,
+};
+
+// ── Graph DDI table (Level-Zero graph extension v1.0) ──
+
+pub const ze_graph_dditable_t = extern struct {
+    pfnCreate: *const fn (ze_context_handle_t, ze_device_handle_t, *const ze_graph_desc_t, *ze_graph_handle_t) callconv(.c) ze_result_t,
+    pfnDestroy: *const fn (ze_graph_handle_t) callconv(.c) ze_result_t,
+    pfnGetProperties: *const fn (ze_graph_handle_t, *ze_graph_properties_t) callconv(.c) ze_result_t,
+    pfnGetArgumentProperties: *const fn (ze_graph_handle_t, u32, *anyopaque) callconv(.c) ze_result_t,
+    pfnSetArgumentValue: *const fn (ze_graph_handle_t, u32, *anyopaque) callconv(.c) ze_result_t,
+    pfnAppendGraphInitialize: *const fn (ze_command_list_handle_t, ze_graph_handle_t, ?ze_event_handle_t, u32, ?[*]ze_event_handle_t) callconv(.c) ze_result_t,
+    pfnAppendGraphExecute: *const fn (ze_command_list_handle_t, ze_graph_handle_t, ?*anyopaque, ?ze_event_handle_t, u32, ?[*]ze_event_handle_t) callconv(.c) ze_result_t,
+    pfnGetNativeBinary: *const fn (ze_graph_handle_t, *usize, ?[*]u8) callconv(.c) ze_result_t,
+    pfnDeviceGetGraphProperties: *const fn (ze_device_handle_t, *ze_device_graph_properties_t) callconv(.c) ze_result_t,
+};
+
 // ── Function pointer types ──
 
 pub const pfnInit = *const fn (u32) callconv(.c) ze_result_t;
@@ -112,6 +197,23 @@ pub const pfnContextCreate = *const fn (ze_driver_handle_t, *const ze_context_de
 pub const pfnContextDestroy = *const fn (ze_context_handle_t) callconv(.c) ze_result_t;
 pub const pfnCommandQueueCreate = *const fn (ze_context_handle_t, ze_device_handle_t, *const ze_command_queue_desc_t, *ze_command_queue_handle_t) callconv(.c) ze_result_t;
 pub const pfnCommandQueueDestroy = *const fn (ze_command_queue_handle_t) callconv(.c) ze_result_t;
+
+pub const pfnCommandListCreate = *const fn (ze_context_handle_t, ze_device_handle_t, *const ze_command_list_desc_t, *ze_command_list_handle_t) callconv(.c) ze_result_t;
+pub const pfnCommandListDestroy = *const fn (ze_command_list_handle_t) callconv(.c) ze_result_t;
+pub const pfnCommandListClose = *const fn (ze_command_list_handle_t) callconv(.c) ze_result_t;
+pub const pfnCommandListReset = *const fn (ze_command_list_handle_t) callconv(.c) ze_result_t;
+
+pub const pfnCommandQueueExecuteCommandLists = *const fn (ze_command_queue_handle_t, u32, *const ze_command_list_handle_t, ?ze_fence_handle_t) callconv(.c) ze_result_t;
+
+pub const pfnFenceCreate = *const fn (ze_command_queue_handle_t, *const ze_fence_desc_t, *ze_fence_handle_t) callconv(.c) ze_result_t;
+pub const pfnFenceDestroy = *const fn (ze_fence_handle_t) callconv(.c) ze_result_t;
+pub const pfnFenceHostSynchronize = *const fn (ze_fence_handle_t, u64) callconv(.c) ze_result_t;
+pub const pfnFenceReset = *const fn (ze_fence_handle_t) callconv(.c) ze_result_t;
+
+pub const pfnMemAllocShared = *const fn (ze_context_handle_t, *const ze_device_mem_alloc_desc_t, *const ze_host_mem_alloc_desc_t, usize, usize, ze_device_handle_t, *?*anyopaque) callconv(.c) ze_result_t;
+pub const pfnMemFree = *const fn (ze_context_handle_t, *anyopaque) callconv(.c) ze_result_t;
+
+pub const pfnDriverGetExtensionFunctionAddress = *const fn (ze_driver_handle_t, [*:0]const u8, *?*anyopaque) callconv(.c) ze_result_t;
 
 // ── Dispatch table ──
 
@@ -124,17 +226,41 @@ pub const Dispatch = struct {
     zeContextDestroy: pfnContextDestroy,
     zeCommandQueueCreate: pfnCommandQueueCreate,
     zeCommandQueueDestroy: pfnCommandQueueDestroy,
+    zeCommandListCreate: pfnCommandListCreate,
+    zeCommandListDestroy: pfnCommandListDestroy,
+    zeCommandListClose: pfnCommandListClose,
+    zeCommandListReset: pfnCommandListReset,
+    zeCommandQueueExecuteCommandLists: pfnCommandQueueExecuteCommandLists,
+    zeFenceCreate: pfnFenceCreate,
+    zeFenceDestroy: pfnFenceDestroy,
+    zeFenceHostSynchronize: pfnFenceHostSynchronize,
+    zeFenceReset: pfnFenceReset,
+    zeMemAllocShared: pfnMemAllocShared,
+    zeMemFree: pfnMemFree,
+    zeDriverGetExtensionFunctionAddress: pfnDriverGetExtensionFunctionAddress,
 
-    pub fn load(lib: *std.DynLib) !Dispatch {
+    pub fn load(l: *std.DynLib) !Dispatch {
         return .{
-            .zeInit = lib.lookup(pfnInit, "zeInit") orelse return error.SymbolNotFound,
-            .zeDriverGet = lib.lookup(pfnDriverGet, "zeDriverGet") orelse return error.SymbolNotFound,
-            .zeDeviceGet = lib.lookup(pfnDeviceGet, "zeDeviceGet") orelse return error.SymbolNotFound,
-            .zeDeviceGetProperties = lib.lookup(pfnDeviceGetProperties, "zeDeviceGetProperties") orelse return error.SymbolNotFound,
-            .zeContextCreate = lib.lookup(pfnContextCreate, "zeContextCreate") orelse return error.SymbolNotFound,
-            .zeContextDestroy = lib.lookup(pfnContextDestroy, "zeContextDestroy") orelse return error.SymbolNotFound,
-            .zeCommandQueueCreate = lib.lookup(pfnCommandQueueCreate, "zeCommandQueueCreate") orelse return error.SymbolNotFound,
-            .zeCommandQueueDestroy = lib.lookup(pfnCommandQueueDestroy, "zeCommandQueueDestroy") orelse return error.SymbolNotFound,
+            .zeInit = l.lookup(pfnInit, "zeInit") orelse return error.SymbolNotFound,
+            .zeDriverGet = l.lookup(pfnDriverGet, "zeDriverGet") orelse return error.SymbolNotFound,
+            .zeDeviceGet = l.lookup(pfnDeviceGet, "zeDeviceGet") orelse return error.SymbolNotFound,
+            .zeDeviceGetProperties = l.lookup(pfnDeviceGetProperties, "zeDeviceGetProperties") orelse return error.SymbolNotFound,
+            .zeContextCreate = l.lookup(pfnContextCreate, "zeContextCreate") orelse return error.SymbolNotFound,
+            .zeContextDestroy = l.lookup(pfnContextDestroy, "zeContextDestroy") orelse return error.SymbolNotFound,
+            .zeCommandQueueCreate = l.lookup(pfnCommandQueueCreate, "zeCommandQueueCreate") orelse return error.SymbolNotFound,
+            .zeCommandQueueDestroy = l.lookup(pfnCommandQueueDestroy, "zeCommandQueueDestroy") orelse return error.SymbolNotFound,
+            .zeCommandListCreate = l.lookup(pfnCommandListCreate, "zeCommandListCreate") orelse return error.SymbolNotFound,
+            .zeCommandListDestroy = l.lookup(pfnCommandListDestroy, "zeCommandListDestroy") orelse return error.SymbolNotFound,
+            .zeCommandListClose = l.lookup(pfnCommandListClose, "zeCommandListClose") orelse return error.SymbolNotFound,
+            .zeCommandListReset = l.lookup(pfnCommandListReset, "zeCommandListReset") orelse return error.SymbolNotFound,
+            .zeCommandQueueExecuteCommandLists = l.lookup(pfnCommandQueueExecuteCommandLists, "zeCommandQueueExecuteCommandLists") orelse return error.SymbolNotFound,
+            .zeFenceCreate = l.lookup(pfnFenceCreate, "zeFenceCreate") orelse return error.SymbolNotFound,
+            .zeFenceDestroy = l.lookup(pfnFenceDestroy, "zeFenceDestroy") orelse return error.SymbolNotFound,
+            .zeFenceHostSynchronize = l.lookup(pfnFenceHostSynchronize, "zeFenceHostSynchronize") orelse return error.SymbolNotFound,
+            .zeFenceReset = l.lookup(pfnFenceReset, "zeFenceReset") orelse return error.SymbolNotFound,
+            .zeMemAllocShared = l.lookup(pfnMemAllocShared, "zeMemAllocShared") orelse return error.SymbolNotFound,
+            .zeMemFree = l.lookup(pfnMemFree, "zeMemFree") orelse return error.SymbolNotFound,
+            .zeDriverGetExtensionFunctionAddress = l.lookup(pfnDriverGetExtensionFunctionAddress, "zeDriverGetExtensionFunctionAddress") orelse return error.SymbolNotFound,
         };
     }
 };
