@@ -1,6 +1,12 @@
 const std = @import("std");
 const math = std.math;
 const Allocator = std.mem.Allocator;
+const build_options = @import("build_options");
+
+pub const backend = switch (build_options.backend) {
+    .cpu => @import("backends/cpu.zig"),
+    .intel_npu => @import("backends/intel_npu.zig"),
+};
 
 pub const Tensor = struct {
     data: []f32,
@@ -65,51 +71,6 @@ pub const Tensor = struct {
     }
 };
 
-pub const cpu = struct {
-    pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize) void {
-        const VEC = 8;
-        for (0..M) |i| {
-            const row = W[i * K ..][0..K];
-            var j: usize = 0;
-            var vec_acc: @Vector(VEC, f32) = @splat(0);
-            while (j + VEC <= K) : (j += VEC) {
-                const a: @Vector(VEC, f32) = row[j..][0..VEC].*;
-                const b: @Vector(VEC, f32) = x[j..][0..VEC].*;
-                vec_acc += a * b;
-            }
-            var sum: f32 = @reduce(.Add, vec_acc);
-            while (j < K) : (j += 1) sum += row[j] * x[j];
-            out[i] = sum;
-        }
-    }
-
-    pub fn softmax_fwd(input: []const f32, output: []f32, n: usize) void {
-        var max_val: f32 = input[0];
-        for (input[1..n]) |v| if (v > max_val) {
-            max_val = v;
-        };
-        var sum: f32 = 0;
-        for (0..n) |i| {
-            output[i] = @exp(input[i] - max_val);
-            sum += output[i];
-        }
-        const inv = 1.0 / sum;
-        for (0..n) |i| output[i] *= inv;
-    }
-
-    pub fn rmsnorm_fwd(input: []const f32, output: []f32, n: usize, scale_out: *f32) void {
-        var ms: f32 = 0;
-        for (0..n) |i| ms += input[i] * input[i];
-        ms /= @as(f32, @floatFromInt(n));
-        const scale = 1.0 / @sqrt(ms + 1e-5);
-        scale_out.* = scale;
-        for (0..n) |i| output[i] = input[i] * scale;
-    }
-
-    pub fn relu_fwd(input: []const f32, output: []f32, n: usize) void {
-        for (0..n) |i| output[i] = @max(0, input[i]);
-    }
-};
 
 pub const OpKind = enum {
     leaf,
@@ -213,7 +174,7 @@ pub const Tape = struct {
         const K = W.shape[1];
         const out_idx = try self.newTensor(&.{M});
         const out = self.get(out_idx);
-        cpu.matmul_fwd(W.data, x.data, out.data, M, K);
+        backend.matmul_fwd(W.data, x.data, out.data, M, K);
 
         try self.record(.{
             .op = .matmul,
@@ -230,7 +191,7 @@ pub const Tape = struct {
         const out_idx = try self.newTensor(a.shape[0..a.ndim]);
         const out = self.get(out_idx);
         var scale: f32 = 0;
-        cpu.rmsnorm_fwd(a.data, out.data, n, &scale);
+        backend.rmsnorm_fwd(a.data, out.data, n, &scale);
 
         try self.record(.{
             .op = .rmsnorm,
@@ -247,7 +208,7 @@ pub const Tape = struct {
         const n = a.numel();
         const out_idx = try self.newTensor(a.shape[0..a.ndim]);
         const out = self.get(out_idx);
-        cpu.relu_fwd(a.data, out.data, n);
+        backend.relu_fwd(a.data, out.data, n);
 
         try self.record(.{
             .op = .relu,
@@ -280,7 +241,7 @@ pub const Tape = struct {
         const n = a.numel();
         const out_idx = try self.newTensor(a.shape[0..a.ndim]);
         const out = self.get(out_idx);
-        cpu.softmax_fwd(a.data, out.data, n);
+        backend.softmax_fwd(a.data, out.data, n);
 
         try self.record(.{
             .op = .softmax,
@@ -336,7 +297,7 @@ pub const Tape = struct {
                 }
                 scores[t] = dot * scale;
             }
-            cpu.softmax_fwd(scores, weights, n_cached);
+            backend.softmax_fwd(scores, weights, n_cached);
             for (0..head_dim) |d| {
                 var sum: f32 = 0;
                 for (0..n_cached) |t| {
@@ -491,7 +452,7 @@ pub const Tape = struct {
                 for (0..head_dim) |d| dot += q.data[hs + d] * k_t.data[hs + d];
                 scores[t] = dot * scale;
             }
-            cpu.softmax_fwd(scores, weights, n_cached);
+            backend.softmax_fwd(scores, weights, n_cached);
 
             @memset(d_weights, 0);
             for (0..head_dim) |d| {
@@ -534,7 +495,7 @@ test "CPU matmul correctness" {
     const W = [_]f32{ 1, 2, 3, 4, 5, 6 };
     const x = [_]f32{ 1, 1 };
     var out: [3]f32 = undefined;
-    cpu.matmul_fwd(&W, &x, &out, 3, 2);
+    backend.matmul_fwd(&W, &x, &out, 3, 2);
     try std.testing.expectApproxEqAbs(@as(f32, 3), out[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 7), out[1], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 11), out[2], 1e-5);
@@ -543,7 +504,7 @@ test "CPU matmul correctness" {
 test "CPU softmax sums to 1" {
     const input = [_]f32{ 1, 2, 3 };
     var output: [3]f32 = undefined;
-    cpu.softmax_fwd(&input, &output, 3);
+    backend.softmax_fwd(&input, &output, 3);
     var sum: f32 = 0;
     for (&output) |v| sum += v;
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), sum, 1e-5);
@@ -555,7 +516,7 @@ test "CPU rmsnorm unit scale" {
     const input = [_]f32{ 1, 2, 3 };
     var output: [3]f32 = undefined;
     var scale: f32 = undefined;
-    cpu.rmsnorm_fwd(&input, &output, 3, &scale);
+    backend.rmsnorm_fwd(&input, &output, 3, &scale);
     var rms_sq: f32 = 0;
     for (&output) |v| rms_sq += v * v;
     rms_sq /= 3.0;
