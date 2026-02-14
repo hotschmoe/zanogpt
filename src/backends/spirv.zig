@@ -78,7 +78,7 @@ pub const SpvModule = struct {
 
     fn emitHeader(self: *SpvModule) void {
         self.words[0] = MAGIC;
-        self.words[1] = 0x00010500; // SPIR-V 1.5
+        self.words[1] = 0x00010000; // SPIR-V 1.0
         self.words[2] = 0; // generator
         self.words[3] = 0; // bound (patched later)
         self.words[4] = 0; // reserved
