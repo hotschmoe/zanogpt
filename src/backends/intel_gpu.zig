@@ -27,6 +27,7 @@ var softmax_cache: ?CachedKernel = null;
 const SharedBuf = struct {
     ptr: *anyopaque,
     size: usize,
+    in_use: bool = false,
 
     fn asF32Slice(self: SharedBuf) []f32 {
         const n = self.size / @sizeOf(f32);
@@ -41,8 +42,11 @@ var num_bufs: usize = 0;
 
 fn getOrAllocShared(min_size: usize) !SharedBuf {
     const d = dispatch.?;
-    for (shared_bufs[0..num_bufs]) |buf| {
-        if (buf.size >= min_size) return buf;
+    for (0..num_bufs) |i| {
+        if (shared_bufs[i].size >= min_size and !shared_bufs[i].in_use) {
+            shared_bufs[i].in_use = true;
+            return SharedBuf{ .ptr = shared_bufs[i].ptr, .size = shared_bufs[i].size };
+        }
     }
     if (num_bufs >= MAX_BUFS) {
         log.err("shared buffer cache full ({d} entries)", .{MAX_BUFS});
@@ -52,10 +56,16 @@ fn getOrAllocShared(min_size: usize) !SharedBuf {
     const dev_desc: ze.ze_device_mem_alloc_desc_t = .{};
     const host_desc: ze.ze_host_mem_alloc_desc_t = .{};
     try ze.check(d.zeMemAllocShared(context.?, &dev_desc, &host_desc, min_size, 64, device.?, &ptr));
-    const buf = SharedBuf{ .ptr = ptr.?, .size = min_size };
-    shared_bufs[num_bufs] = buf;
+    shared_bufs[num_bufs] = .{ .ptr = ptr.?, .size = min_size, .in_use = true };
     num_bufs += 1;
-    return buf;
+    return SharedBuf{ .ptr = ptr.?, .size = min_size };
+}
+
+/// Release all shared buffers so they can be reused by the next operation.
+fn releaseSharedBufs() void {
+    for (0..num_bufs) |i| {
+        shared_bufs[i].in_use = false;
+    }
 }
 
 fn getOrCompileKernel(cache: *?CachedKernel, spv_bytes: []const u8, kernel_name: [*:0]const u8) !CachedKernel {
@@ -239,6 +249,7 @@ pub fn relu_fwd(input: []const f32, output: []f32, n: usize) void {
     const cached = getOrCompileKernel(&relu_cache, spv.asBytes(), "relu_kernel") catch
         @panic("GPU relu kernel compilation failed");
 
+    releaseSharedBufs();
     const size = n * @sizeOf(f32);
     const buf_in = getOrAllocShared(size) catch @panic("GPU alloc failed");
     const buf_out = getOrAllocShared(size) catch @panic("GPU alloc failed");
@@ -261,6 +272,7 @@ pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize
     const cached = getOrCompileKernel(&matmul_cache, spv.asBytes(), "matmul_kernel") catch
         @panic("GPU matmul kernel compilation failed");
 
+    releaseSharedBufs();
     const buf_w = getOrAllocShared(M * K * @sizeOf(f32)) catch @panic("GPU alloc failed");
     const buf_x = getOrAllocShared(K * @sizeOf(f32)) catch @panic("GPU alloc failed");
     const buf_out = getOrAllocShared(M * @sizeOf(f32)) catch @panic("GPU alloc failed");
@@ -286,6 +298,7 @@ pub fn softmax_fwd(input: []const f32, output: []f32, n: usize) void {
     const cached = getOrCompileKernel(&softmax_cache, spv.asBytes(), "softmax_kernel") catch
         @panic("GPU softmax kernel compilation failed");
 
+    releaseSharedBufs();
     const size = n * @sizeOf(f32);
     const buf_in = getOrAllocShared(size) catch @panic("GPU alloc failed");
     const buf_out = getOrAllocShared(size) catch @panic("GPU alloc failed");
