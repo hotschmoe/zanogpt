@@ -20,18 +20,13 @@ pub const SpvModule = struct {
         }
     }
 
-    /// Emit an instruction whose last logical operand is a NUL-terminated string.
-    fn emitString(self: *SpvModule, opcode: u16, pre: []const u32, s: []const u8) void {
-        const str_words = (s.len + 4) / 4;
-        const wc: u16 = @intCast(1 + pre.len + str_words);
-        self.words[self.len] = @as(u32, wc) << 16 | @as(u32, opcode);
-        self.len += 1;
-        for (pre) |op| {
-            self.words[self.len] = op;
-            self.len += 1;
-        }
+    fn strWordCount(s: []const u8) usize {
+        return (s.len + 4) / 4;
+    }
+
+    fn emitStringWords(self: *SpvModule, s: []const u8) void {
         var i: usize = 0;
-        while (i < str_words) : (i += 1) {
+        while (i < strWordCount(s)) : (i += 1) {
             var word: u32 = 0;
             for (0..4) |b| {
                 const idx = i * 4 + b;
@@ -44,28 +39,28 @@ pub const SpvModule = struct {
         }
     }
 
+    /// Emit an instruction whose last logical operand is a NUL-terminated string.
+    fn emitString(self: *SpvModule, opcode: u16, pre: []const u32, s: []const u8) void {
+        const wc: u16 = @intCast(1 + pre.len + strWordCount(s));
+        self.words[self.len] = @as(u32, wc) << 16 | @as(u32, opcode);
+        self.len += 1;
+        for (pre) |op| {
+            self.words[self.len] = op;
+            self.len += 1;
+        }
+        self.emitStringWords(s);
+    }
+
     /// Emit OpEntryPoint with interface variables after the name string.
     fn emitEntryPoint(self: *SpvModule, func_id: u32, name: []const u8, interface: []const u32) void {
-        const str_words = (name.len + 4) / 4;
-        const wc: u16 = @intCast(1 + 2 + str_words + interface.len);
+        const wc: u16 = @intCast(1 + 2 + strWordCount(name) + interface.len);
         self.words[self.len] = @as(u32, wc) << 16 | @as(u32, OpEntryPoint);
         self.len += 1;
         self.words[self.len] = ExecutionModel_Kernel;
         self.len += 1;
         self.words[self.len] = func_id;
         self.len += 1;
-        var i: usize = 0;
-        while (i < str_words) : (i += 1) {
-            var word: u32 = 0;
-            for (0..4) |b| {
-                const idx = i * 4 + b;
-                if (idx < name.len) {
-                    word |= @as(u32, name[idx]) << @intCast(b * 8);
-                }
-            }
-            self.words[self.len] = word;
-            self.len += 1;
-        }
+        self.emitStringWords(name);
         for (interface) |v| {
             self.words[self.len] = v;
             self.len += 1;

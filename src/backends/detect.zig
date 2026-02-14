@@ -31,7 +31,19 @@ fn detectHardware() DetectedHardware {
     };
 }
 
-const AccelChoice = enum { npu, gpu, cpu };
+const AccelChoice = enum {
+    npu,
+    gpu,
+    cpu,
+
+    fn label(self: AccelChoice) []const u8 {
+        return switch (self) {
+            .npu => "Intel NPU",
+            .gpu => "Intel GPU",
+            .cpu => "CPU only",
+        };
+    }
+};
 
 fn promptAccelerator(hw: *const DetectedHardware) AccelChoice {
     var options: [3]AccelChoice = undefined;
@@ -53,11 +65,7 @@ fn promptAccelerator(hw: *const DetectedHardware) AccelChoice {
     _ = stdout.write("\nAvailable accelerators:\n") catch return .cpu;
     for (options[0..count], 1..) |opt, i| {
         var line_buf: [64]u8 = undefined;
-        const line = switch (opt) {
-            .npu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel NPU\n", .{i}) catch continue,
-            .gpu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel GPU\n", .{i}) catch continue,
-            .cpu => std.fmt.bufPrint(&line_buf, "  [{d}] CPU only\n", .{i}) catch continue,
-        };
+        const line = std.fmt.bufPrint(&line_buf, "  [{d}] {s}\n", .{ i, opt.label() }) catch continue;
         _ = stdout.write(line) catch {};
     }
 
@@ -72,6 +80,21 @@ fn promptAccelerator(hw: *const DetectedHardware) AccelChoice {
     return options[0];
 }
 
+fn envOverride() ?AccelChoice {
+    const env_w = std.process.getenvW(std.unicode.utf8ToUtf16LeStringLiteral("ZANOGPT_BACKEND")) orelse return null;
+    var buf: [32]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&buf, env_w) catch return null;
+    const env = buf[0..len];
+    inline for (.{ .npu, .gpu, .cpu }) |choice| {
+        if (std.mem.eql(u8, env, @tagName(choice))) {
+            log.info("ZANOGPT_BACKEND={s} (forced)", .{env});
+            return choice;
+        }
+    }
+    log.warn("unknown ZANOGPT_BACKEND='{s}', ignoring", .{env});
+    return null;
+}
+
 pub fn selectBackend() Backend {
     const hw = detectHardware();
 
@@ -82,28 +105,7 @@ pub fn selectBackend() Backend {
         log.info("Qualcomm NPU detected (not yet supported, using CPU)", .{});
     }
 
-    // ZANOGPT_BACKEND=npu|gpu|cpu to skip the interactive prompt
-    const choice = blk: {
-        const env_w = std.process.getenvW(std.unicode.utf8ToUtf16LeStringLiteral("ZANOGPT_BACKEND"));
-        if (env_w) |val| {
-            var buf: [32]u8 = undefined;
-            const len = std.unicode.utf16LeToUtf8(&buf, val) catch break :blk promptAccelerator(&hw);
-            const env = buf[0..len];
-            if (std.mem.eql(u8, env, "npu")) {
-                log.info("ZANOGPT_BACKEND=npu (forced)", .{});
-                break :blk AccelChoice.npu;
-            } else if (std.mem.eql(u8, env, "gpu")) {
-                log.info("ZANOGPT_BACKEND=gpu (forced)", .{});
-                break :blk AccelChoice.gpu;
-            } else if (std.mem.eql(u8, env, "cpu")) {
-                log.info("ZANOGPT_BACKEND=cpu (forced)", .{});
-                break :blk AccelChoice.cpu;
-            } else {
-                log.warn("unknown ZANOGPT_BACKEND='{s}', ignoring", .{env});
-            }
-        }
-        break :blk promptAccelerator(&hw);
-    };
+    const choice = envOverride() orelse promptAccelerator(&hw);
 
     switch (choice) {
         .npu => {

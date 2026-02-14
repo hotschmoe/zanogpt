@@ -63,7 +63,6 @@ fn getOrCompileKernel(cache: *?CachedKernel, spv_bytes: []const u8, kernel_name:
 
     const d = dispatch.?;
     const mod_desc = ze.ze_module_desc_t{
-        .format = .IL_SPIRV,
         .inputSize = spv_bytes.len,
         .pInputModule = spv_bytes.ptr,
     };
@@ -208,10 +207,7 @@ pub fn init() !void {
     try ze.check(d.zeContextCreate(driver.?, &ctx_desc, &ctx));
     context = ctx;
 
-    const cq_desc: ze.ze_command_queue_desc_t = .{
-        .mode = .SYNCHRONOUS,
-        .priority = .NORMAL,
-    };
+    const cq_desc: ze.ze_command_queue_desc_t = .{};
     var cq: ze.ze_command_queue_handle_t = undefined;
     try ze.check(d.zeCommandQueueCreate(context.?, device.?, &cq_desc, &cq));
     queue = cq;

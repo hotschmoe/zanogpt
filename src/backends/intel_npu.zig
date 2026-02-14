@@ -118,10 +118,7 @@ pub fn init() !void {
     try ze.check(d.zeContextCreate(driver.?, &ctx_desc, &ctx));
     context = ctx;
 
-    const cq_desc: ze.ze_command_queue_desc_t = .{
-        .mode = .SYNCHRONOUS,
-        .priority = .NORMAL,
-    };
+    const cq_desc: ze.ze_command_queue_desc_t = .{};
     var cq: ze.ze_command_queue_handle_t = undefined;
     try ze.check(d.zeCommandQueueCreate(context.?, device.?, &cq_desc, &cq));
     queue = cq;
