@@ -68,7 +68,25 @@ fn getOrCompileKernel(cache: *?CachedKernel, spv_bytes: []const u8, kernel_name:
         .pInputModule = spv_bytes.ptr,
     };
     var mod: ze.ze_module_handle_t = undefined;
-    try ze.check(d.zeModuleCreate(context.?, device.?, &mod_desc, &mod, null));
+    var build_log: ?ze.ze_module_build_log_handle_t = null;
+    const create_result = d.zeModuleCreate(context.?, device.?, &mod_desc, &mod, @ptrCast(&build_log));
+    if (create_result != .SUCCESS) {
+        // Log build errors if available
+        if (build_log) |bl| {
+            var log_size: usize = 0;
+            if (d.zeModuleBuildLogGetString(bl, &log_size, null) == .SUCCESS and log_size > 1) {
+                var log_buf: [1024]u8 = undefined;
+                var fetch_sz: usize = @min(log_size, log_buf.len);
+                if (d.zeModuleBuildLogGetString(bl, &fetch_sz, &log_buf) == .SUCCESS) {
+                    log.err("SPIR-V build log: {s}", .{log_buf[0..fetch_sz -| 1]});
+                }
+            }
+            _ = d.zeModuleBuildLogDestroy(bl);
+        }
+        log.err("zeModuleCreate failed: 0x{x}", .{@intFromEnum(create_result)});
+        try ze.check(create_result);
+    }
+    if (build_log) |bl| _ = d.zeModuleBuildLogDestroy(bl);
 
     const kern_desc = ze.ze_kernel_desc_t{ .pKernelName = kernel_name };
     var kern: ze.ze_kernel_handle_t = undefined;

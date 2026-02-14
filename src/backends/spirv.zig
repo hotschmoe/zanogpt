@@ -45,6 +45,37 @@ pub const SpvModule = struct {
         }
     }
 
+    /// Emit OpEntryPoint with interface variables listed after the name string.
+    /// Format: OpEntryPoint <exec_model> <func_id> "name" <interface_var>...
+    fn emitEntryPoint(self: *SpvModule, exec_model: u32, func_id: u32, name: []const u8, interface: []const u32) void {
+        const str_words = (name.len + 4) / 4;
+        const wc: u16 = @intCast(1 + 2 + str_words + interface.len);
+        self.words[self.len] = @as(u32, wc) << 16 | @as(u32, OpEntryPoint);
+        self.len += 1;
+        self.words[self.len] = exec_model;
+        self.len += 1;
+        self.words[self.len] = func_id;
+        self.len += 1;
+        // Pack string bytes into words
+        var i: usize = 0;
+        while (i < str_words) : (i += 1) {
+            var word: u32 = 0;
+            for (0..4) |b| {
+                const idx = i * 4 + b;
+                if (idx < name.len) {
+                    word |= @as(u32, name[idx]) << @intCast(b * 8);
+                }
+            }
+            self.words[self.len] = word;
+            self.len += 1;
+        }
+        // Interface variables
+        for (interface) |v| {
+            self.words[self.len] = v;
+            self.len += 1;
+        }
+    }
+
     fn emitHeader(self: *SpvModule) void {
         self.words[0] = MAGIC;
         self.words[1] = 0x00010500; // SPIR-V 1.5
@@ -179,7 +210,10 @@ pub fn reluModule() SpvModule {
     const out_ptr: u32 = 27;
     const cmp_gt: u32 = 28;
 
-    m.emitString(OpEntryPoint, &.{ ExecutionModel_Kernel, func_id }, "relu_kernel");
+    m.emitEntryPoint(ExecutionModel_Kernel, func_id, "relu_kernel", &.{gid_var});
+
+    // Annotations (must precede type/variable declarations per SPIR-V layout)
+    m.emit(OpDecorate, &.{ gid_var, BuiltIn, BuiltIn_GlobalInvocationId });
 
     // Types
     m.emit(OpTypeVoid, &.{void_t});
@@ -196,9 +230,8 @@ pub fn reluModule() SpvModule {
     m.emit(OpConstant, &.{ uint_t, const_0u, 0 });
     m.emit(OpConstant, &.{ float_t, const_0f, @bitCast(@as(f32, 0.0)) });
 
-    // GlobalInvocationId built-in variable
+    // Global variables
     m.emit(OpVariable, &.{ ptr_uint3_in, gid_var, StorageClass_Input });
-    m.emit(OpDecorate, &.{ gid_var, BuiltIn, BuiltIn_GlobalInvocationId });
 
     // Function definition
     m.emit(OpFunction, &.{ void_t, func_id, FunctionControl_None, func_t });
@@ -290,7 +323,10 @@ pub fn matmulModule() SpvModule {
 
     const bound: u32 = 43;
 
-    m.emitString(OpEntryPoint, &.{ ExecutionModel_Kernel, func_id }, "matmul_kernel");
+    m.emitEntryPoint(ExecutionModel_Kernel, func_id, "matmul_kernel", &.{gid_var});
+
+    // Annotations
+    m.emit(OpDecorate, &.{ gid_var, BuiltIn, BuiltIn_GlobalInvocationId });
 
     // Types
     m.emit(OpTypeVoid, &.{void_t});
@@ -308,9 +344,8 @@ pub fn matmulModule() SpvModule {
     m.emit(OpConstant, &.{ float_t, const_0f, @bitCast(@as(f32, 0.0)) });
     m.emit(OpConstant, &.{ uint_t, const_1u, 1 });
 
-    // GlobalInvocationId
+    // Global variables
     m.emit(OpVariable, &.{ ptr_uint3_in, gid_var, StorageClass_Input });
-    m.emit(OpDecorate, &.{ gid_var, BuiltIn, BuiltIn_GlobalInvocationId });
 
     // Function
     m.emit(OpFunction, &.{ void_t, func_id, FunctionControl_None, func_t });
@@ -442,7 +477,10 @@ pub fn softmaxModule() SpvModule {
 
     const bound: u32 = 53;
 
-    m.emitString(OpEntryPoint, &.{ ExecutionModel_Kernel, func_id }, "softmax_kernel");
+    m.emitEntryPoint(ExecutionModel_Kernel, func_id, "softmax_kernel", &.{gid_var});
+
+    // Annotations
+    m.emit(OpDecorate, &.{ gid_var, BuiltIn, BuiltIn_GlobalInvocationId });
 
     // Types
     m.emit(OpTypeVoid, &.{void_t});
@@ -459,9 +497,8 @@ pub fn softmaxModule() SpvModule {
     m.emit(OpConstant, &.{ float_t, const_0f, @bitCast(@as(f32, 0.0)) });
     m.emit(OpConstant, &.{ uint_t, const_1u, 1 });
 
-    // GlobalInvocationId
+    // Global variables
     m.emit(OpVariable, &.{ ptr_uint3_in, gid_var, StorageClass_Input });
-    m.emit(OpDecorate, &.{ gid_var, BuiltIn, BuiltIn_GlobalInvocationId });
 
     // Function
     m.emit(OpFunction, &.{ void_t, func_id, FunctionControl_None, func_t });

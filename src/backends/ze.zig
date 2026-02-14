@@ -10,6 +10,7 @@ pub const ze_graph_handle_t = *opaque {};
 pub const ze_event_handle_t = *opaque {};
 pub const ze_graph_build_log_handle_t = *opaque {};
 pub const ze_module_handle_t = *opaque {};
+pub const ze_module_build_log_handle_t = *opaque {};
 pub const ze_kernel_handle_t = *opaque {};
 
 pub const ze_result_t = enum(u32) {
@@ -309,6 +310,8 @@ pub const pfnKernelSuggestGroupSize = *const fn (ze_kernel_handle_t, u32, u32, u
 pub const pfnCommandListAppendLaunchKernel = *const fn (ze_command_list_handle_t, ze_kernel_handle_t, *const ze_group_count_t, ?ze_event_handle_t, u32, ?[*]ze_event_handle_t) callconv(.c) ze_result_t;
 pub const pfnMemAllocDevice = *const fn (ze_context_handle_t, *const ze_device_mem_alloc_desc_t, usize, usize, ze_device_handle_t, *?*anyopaque) callconv(.c) ze_result_t;
 pub const pfnCommandListAppendMemoryCopy = *const fn (ze_command_list_handle_t, *anyopaque, *const anyopaque, usize, ?ze_event_handle_t, u32, ?[*]ze_event_handle_t) callconv(.c) ze_result_t;
+pub const pfnModuleBuildLogGetString = *const fn (ze_module_build_log_handle_t, *usize, ?[*]u8) callconv(.c) ze_result_t;
+pub const pfnModuleBuildLogDestroy = *const fn (ze_module_build_log_handle_t) callconv(.c) ze_result_t;
 
 pub const Dispatch = struct {
     zeInit: pfnInit,
@@ -342,6 +345,8 @@ pub const Dispatch = struct {
     zeCommandListAppendLaunchKernel: pfnCommandListAppendLaunchKernel,
     zeMemAllocDevice: pfnMemAllocDevice,
     zeCommandListAppendMemoryCopy: pfnCommandListAppendMemoryCopy,
+    zeModuleBuildLogGetString: pfnModuleBuildLogGetString,
+    zeModuleBuildLogDestroy: pfnModuleBuildLogDestroy,
 
     pub fn load(l: *std.DynLib) !Dispatch {
         var self: Dispatch = undefined;
