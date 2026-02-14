@@ -2,6 +2,7 @@ const std = @import("std");
 const ze = @import("ze.zig");
 const ov_ir = @import("ov_ir.zig");
 const cpu = @import("cpu.zig");
+const Backend = @import("backend.zig").Backend;
 const log = std.log.scoped(.intel_npu);
 
 var lib: ?std.DynLib = null;
@@ -435,8 +436,6 @@ fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize, b
 pub fn rmsnorm_fwd(input: []const f32, output: []f32, n: usize, scale_out: *f32) void {
     cpu.rmsnorm_fwd(input, output, n, scale_out);
 }
-
-const Backend = @import("backend.zig").Backend;
 
 pub fn backend() Backend {
     return .{

@@ -71,7 +71,6 @@ pub const Tensor = struct {
     }
 };
 
-
 pub const OpKind = enum {
     leaf,
     embedding_lookup,

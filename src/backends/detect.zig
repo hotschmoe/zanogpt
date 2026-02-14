@@ -25,11 +25,11 @@ fn detectHardware() DetectedHardware {
 }
 
 fn promptIntelNpu() bool {
-    const stdout_file = std.fs.File.stdout();
-    const stdin_file = std.fs.File.stdin();
-    _ = stdout_file.write("Intel NPU detected. Use for acceleration? [y/n]: ") catch return false;
+    const stdout = std.fs.File.stdout();
+    const stdin = std.fs.File.stdin();
+    _ = stdout.write("Intel NPU detected. Use for acceleration? [y/n]: ") catch return false;
     var buf: [16]u8 = undefined;
-    const n = stdin_file.read(&buf) catch return false;
+    const n = stdin.read(&buf) catch return false;
     if (n == 0) return false;
     return buf[0] == 'y' or buf[0] == 'Y';
 }
