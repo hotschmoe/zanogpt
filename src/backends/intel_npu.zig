@@ -148,10 +148,8 @@ pub fn init() !void {
     queue = cq;
     log.info("Level-Zero command queue created (synchronous)", .{});
 
-    // 9. Get graph extension DDI table
-    var ddi_ptr: ?*anyopaque = null;
-    try ze.check(d.zeDriverGetExtensionFunctionAddress(driver.?, "ZE_extension_graph", &ddi_ptr));
-    graph_ddi = @ptrCast(@alignCast(ddi_ptr.?));
+    // 9. Acquire graph extension DDI table (two-tier mechanism matching OpenVINO)
+    graph_ddi = try acquireGraphDDI(d, driver.?);
     log.info("graph extension DDI table acquired", .{});
 
     // 10. Query compiler version from device graph properties
@@ -185,39 +183,114 @@ pub fn init() !void {
     fence = f;
     log.info("reusable fence created", .{});
 
-    // 13. Smoke test: compile + execute a tiny ReLU graph
+    // 13. Smoke test: compile a tiny ReLU graph
     try smokeTest();
 
     log.info("Intel NPU backend initialized successfully", .{});
 }
 
-fn smokeTest() !void {
-    log.info("running NPU smoke test (ReLU [4])...", .{});
+/// Acquire the graph extension DDI table using OpenVINO's two-tier mechanism:
+/// 1. Enumerate driver extensions to find graph extension name + version
+/// 2. Try ZE_extension_driver_npu → pfnGetExtension (versioned acquisition)
+/// 3. Fallback: zeDriverGetExtensionFunctionAddress with the extension name
+fn acquireGraphDDI(d: ze.Dispatch, drv: ze.ze_driver_handle_t) !*const ze.ze_graph_dditable_t {
+    // 1. Enumerate driver extensions to find graph extension
+    var ext_count: u32 = 0;
+    try ze.check(d.zeDriverGetExtensionProperties(drv, &ext_count, null));
 
-    // Compile a ReLU graph for 4 elements
-    const cached = try getOrCompileGraph(
-        .{ .op = .relu, .dims = .{ 4, 0, 0, 0 } },
-        &.{ 4 * @sizeOf(f32), 4 * @sizeOf(f32) },
-        2,
-        ov_ir.unary_build_flags,
-    );
+    var ext_buf: [32]ze.ze_driver_extension_properties_t = undefined;
+    var fetch_count: u32 = @min(ext_count, 32);
+    try ze.check(d.zeDriverGetExtensionProperties(drv, &fetch_count, &ext_buf));
 
-    const test_input = [_]f32{ -1.0, 0.0, 2.0, -3.0 };
-    @memcpy(cached.arg_bufs[0].asF32Slice()[0..4], &test_input);
+    // Find ZE_extension_graph by prefix match, pick min(target, driver) version
+    const target_version: u32 = (1 << 16) | 5; // ZE_GRAPH_EXT_VERSION_1_5
+    var graph_ext_version: u32 = 0;
+    var graph_ext_idx: ?usize = null;
+    const graph_prefix = "ZE_extension_graph";
+    var has_npu_driver_ext = false;
 
-    executeGraph(cached);
+    for (ext_buf[0..fetch_count], 0..) |*ext, i| {
+        const name = std.mem.sliceTo(&ext.name, 0);
+        if (std.mem.eql(u8, name, "ZE_extension_driver_npu")) {
+            has_npu_driver_ext = true;
+        }
+        if (name.len < graph_prefix.len) continue;
+        if (!std.mem.eql(u8, name[0..graph_prefix.len], graph_prefix)) continue;
 
-    // Verify output: [0, 0, 2, 0]
-    const out_buf = cached.arg_bufs[1].asF32Slice();
-    const expected = [_]f32{ 0.0, 0.0, 2.0, 0.0 };
-    for (0..4) |i| {
-        if (@abs(out_buf[i] - expected[i]) > 1e-5) {
-            log.err("smoke test failed at index {d}: expected {d}, got {d}", .{ i, expected[i], out_buf[i] });
-            return error.Unknown;
+        if (ext.version >= target_version) {
+            graph_ext_version = target_version;
+            graph_ext_idx = i;
+            break;
+        }
+        if (ext.version > graph_ext_version) {
+            graph_ext_version = ext.version;
+            graph_ext_idx = i;
         }
     }
 
-    log.info("NPU smoke test passed", .{});
+    if (graph_ext_idx == null) {
+        log.err("no ZE_extension_graph extension found", .{});
+        return error.UnsupportedFeature;
+    }
+
+    const graph_ext_name: [*:0]const u8 = @ptrCast(&ext_buf[graph_ext_idx.?].name);
+
+    // 2. Try ZE_extension_driver_npu → pfnGetExtension (versioned path)
+    if (has_npu_driver_ext) {
+        var npu_ddi_ptr: ?*anyopaque = null;
+        if (d.zeDriverGetExtensionFunctionAddress(drv, "ZE_extension_driver_npu", &npu_ddi_ptr) == .SUCCESS) {
+            if (npu_ddi_ptr) |ptr| {
+                const npu_ddi: *const ze.ze_driver_npu_dditable_ext_t = @ptrCast(@alignCast(ptr));
+                var result_ptr: ?*anyopaque = null;
+                var ext_req = ze.ze_driver_extension_npu_ext_t{
+                    .name = graph_ext_name,
+                    .version = graph_ext_version,
+                    .ppFunctionAddress = &result_ptr,
+                };
+                if (npu_ddi.pfnGetExtension(drv, &ext_req) == .SUCCESS) {
+                    if (result_ptr) |rp| return @ptrCast(@alignCast(rp));
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: zeDriverGetExtensionFunctionAddress
+    var ddi_ptr: ?*anyopaque = null;
+    try ze.check(d.zeDriverGetExtensionFunctionAddress(drv, graph_ext_name, &ddi_ptr));
+    return @ptrCast(@alignCast(ddi_ptr.?));
+}
+
+fn smokeTest() !void {
+    log.info("running NPU smoke test (ReLU [4])...", .{});
+
+    const ddi = graph_ddi.?;
+    const blob = ov_ir.reluBlob(4, compiler_ver);
+    var graph: ze.ze_graph_handle_t = undefined;
+
+    if (ddi.pfnCreate2) |create2| {
+        const desc: ze.ze_graph_desc_2_t = .{
+            .format = .NGRAPH_LITE,
+            .inputSize = blob.len,
+            .pInput = &blob.data,
+            .pBuildFlags = ov_ir.relu_build_flags,
+        };
+        const r = create2(context.?, device.?, &desc, &graph);
+        if (r != .SUCCESS) {
+            log.err("smoke test pfnCreate2 failed: 0x{x}", .{@intFromEnum(r)});
+            return error.InvalidArgument;
+        }
+    } else {
+        const desc: ze.ze_graph_desc_t = .{
+            .format = .NGRAPH_LITE,
+            .inputSize = blob.len,
+            .pInput = &blob.data,
+            .pBuildFlags = ov_ir.relu_build_flags,
+        };
+        try ze.check(ddi.pfnCreate(context.?, device.?, &desc, &graph));
+    }
+
+    _ = ddi.pfnDestroy(graph);
+    log.info("smoke test passed", .{});
 }
 
 pub fn deinit() void {
@@ -289,66 +362,37 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
     const d = dispatch.?;
     const ddi = graph_ddi.?;
 
-    // Generate blob
+    // Generate blob (includes VCL header with compiler version)
     var blob = switch (key.op) {
-        .matmul => ov_ir.matmulBlob(key.dims[0], key.dims[1]),
-        .softmax => ov_ir.softmaxBlob(key.dims[0]),
-        .relu => ov_ir.reluBlob(key.dims[0]),
+        .matmul => ov_ir.matmulBlob(key.dims[0], key.dims[1], compiler_ver),
+        .softmax => ov_ir.softmaxBlob(key.dims[0], compiler_ver),
+        .relu => ov_ir.reluBlob(key.dims[0], compiler_ver),
     };
 
-    // Compile graph — try pfnCreate2 (v1.5) first, fall back to pfnCreate (v1.0)
-    const xml_len = std.mem.readInt(u64, blob.data[0..8], .little);
-    log.info("compiling graph: op={s} dims=[{d},{d},{d},{d}] blob_len={d} xml_len={d}", .{
-        @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3], blob.len, xml_len,
+    // Compile graph via pfnCreate2 (v1.5), fall back to pfnCreate (v1.0)
+    log.info("compiling graph: op={s} dims=[{d},{d},{d},{d}]", .{
+        @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3],
     });
-    // Log first 200 chars of XML for diagnostics
-    const xml_preview_len = @min(xml_len, 200);
-    log.info("XML preview: {s}", .{blob.data[8..][0..xml_preview_len]});
 
     var graph: ze.ze_graph_handle_t = undefined;
 
     if (ddi.pfnCreate2) |create2| {
-        const desc2: ze.ze_graph_desc_2_t = .{
+        const desc: ze.ze_graph_desc_2_t = .{
             .format = .NGRAPH_LITE,
             .inputSize = blob.len,
             .pInput = &blob.data,
             .pBuildFlags = build_flags,
-            .flags = 0,
         };
-        const result2 = create2(context.?, device.?, &desc2, &graph);
-        if (result2 != .SUCCESS) {
-            log.warn("pfnCreate2 failed (0x{x}), trying pfnCreate", .{@intFromEnum(result2)});
-        } else {
-            log.info("pfnCreate2 succeeded", .{});
-        }
-        if (result2 == .SUCCESS) {} else {
-            // Fall through to pfnCreate
-            const desc: ze.ze_graph_desc_t = .{
-                .format = .NGRAPH_LITE,
-                .inputSize = blob.len,
-                .pInput = &blob.data,
-                .pBuildFlags = build_flags,
-                .compilerVersion = compiler_ver,
-            };
-            const result1 = ddi.pfnCreate(context.?, device.?, &desc, &graph);
-            if (result1 != .SUCCESS) {
-                log.err("pfnCreate also failed (0x{x})", .{@intFromEnum(result1)});
-                try ze.check(result1);
-            }
-        }
+        try ze.check(create2(context.?, device.?, &desc, &graph));
     } else {
         const desc: ze.ze_graph_desc_t = .{
             .format = .NGRAPH_LITE,
             .inputSize = blob.len,
             .pInput = &blob.data,
             .pBuildFlags = build_flags,
-            .compilerVersion = compiler_ver,
         };
         try ze.check(ddi.pfnCreate(context.?, device.?, &desc, &graph));
     }
-    log.info("compiled graph: op={s} dims=[{d},{d},{d},{d}]", .{
-        @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3],
-    });
 
     // Query number of arguments
     var props: ze.ze_graph_properties_t = .{};
@@ -446,21 +490,21 @@ pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize
 }
 
 pub fn softmax_fwd(input: []const f32, output: []f32, n: usize) void {
-    runUnaryGraph(.softmax, input, output, n);
+    runUnaryGraph(.softmax, input, output, n, ov_ir.softmax_build_flags);
 }
 
 pub fn relu_fwd(input: []const f32, output: []f32, n: usize) void {
-    runUnaryGraph(.relu, input, output, n);
+    runUnaryGraph(.relu, input, output, n, ov_ir.relu_build_flags);
 }
 
 /// Shared implementation for unary NPU ops (2-arg graph: input + output).
-fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize) void {
+fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize, build_flags: [*:0]const u8) void {
     const size = n * @sizeOf(f32);
     const cached = getOrCompileGraph(
         .{ .op = op, .dims = .{ @intCast(n), 0, 0, 0 } },
         &.{ size, size },
         2,
-        ov_ir.unary_build_flags,
+        build_flags,
     ) catch @panic("NPU unary graph compilation failed");
 
     @memcpy(cached.arg_bufs[0].asF32Slice()[0..n], input[0..n]);

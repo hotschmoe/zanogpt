@@ -10,6 +10,7 @@ pub const ze_command_list_handle_t = *opaque {};
 pub const ze_fence_handle_t = *opaque {};
 pub const ze_graph_handle_t = *opaque {};
 pub const ze_event_handle_t = *opaque {};
+pub const ze_graph_build_log_handle_t = *opaque {};
 
 // ── Enums ──
 
@@ -73,6 +74,7 @@ pub const ze_graph_format_t = enum(u32) {
 
 pub const ZE_INIT_FLAG_VPU_ONLY: u32 = 1 << 1;
 pub const ZE_MAX_DEVICE_NAME = 256;
+pub const ZE_MAX_EXTENSION_NAME = 256;
 pub const MAX_U64: u64 = std.math.maxInt(u64);
 
 // ── Extern structs (C ABI layout) ──
@@ -143,6 +145,27 @@ pub const ze_host_mem_alloc_desc_t = extern struct {
     flags: u32 = 0,
 };
 
+pub const ze_driver_extension_properties_t = extern struct {
+    name: [ZE_MAX_EXTENSION_NAME]u8 = .{0} ** ZE_MAX_EXTENSION_NAME,
+    version: u32 = 0,
+};
+
+/// NPU driver meta-extension DDI table (from ze_driver_npu_ext.h).
+/// Contains a single pfnGetExtension for versioned extension acquisition.
+pub const ze_driver_npu_dditable_ext_t = extern struct {
+    pfnGetExtension: *const fn (ze_driver_handle_t, *ze_driver_extension_npu_ext_t) callconv(.c) ze_result_t,
+};
+
+/// Request struct for pfnGetExtension — passes extension name + version,
+/// receives the DDI table pointer back via ppFunctionAddress.
+pub const ze_driver_extension_npu_ext_t = extern struct {
+    stype: u32 = 0x1, // ZE_STRUCTURE_TYPE_DRIVER_EXTENSION_NPU_EXT
+    pNext: ?*anyopaque = null,
+    name: [*:0]const u8,
+    version: u32,
+    ppFunctionAddress: *?*anyopaque,
+};
+
 pub const ze_graph_compiler_version_info_t = extern struct {
     major: u16 = 0,
     minor: u16 = 0,
@@ -158,18 +181,17 @@ pub const ze_device_graph_properties_t = extern struct {
 };
 
 pub const ze_graph_desc_t = extern struct {
-    stype: u32 = 0x2, // ZE_STRUCTURE_TYPE_GRAPH_DESC_PROPERTIES
+    stype: u32 = 0x2, // ZE_STRUCTURE_TYPE_GRAPH_DESC
     pNext: ?*anyopaque = null,
     format: ze_graph_format_t = .NGRAPH_LITE,
     inputSize: usize = 0,
     pInput: ?[*]const u8 = null,
     pBuildFlags: ?[*:0]const u8 = null,
-    compilerVersion: ze_graph_compiler_version_info_t = .{},
 };
 
-/// Version 1.5 graph descriptor — replaces compilerVersion with flags.
+/// Version 1.5 graph descriptor — adds flags field.
 pub const ze_graph_desc_2_t = extern struct {
-    stype: u32 = 0x2,
+    stype: u32 = 0xE, // ZE_STRUCTURE_TYPE_GRAPH_DESC_2
     pNext: ?*anyopaque = null,
     format: ze_graph_format_t = .NGRAPH_LITE,
     inputSize: usize = 0,
@@ -213,6 +235,21 @@ pub const ze_graph_dditable_t = extern struct {
     pfnCreate2: ?*const fn (ze_context_handle_t, ze_device_handle_t, *const ze_graph_desc_2_t, *ze_graph_handle_t) callconv(.c) ze_result_t = null,
     _reserved_v1_5b: ?*anyopaque = null,
     _reserved_v1_5c: ?*anyopaque = null,
+    // ── Version 1.6 (1 function pointer) ──
+    _reserved_v1_6: ?*anyopaque = null,
+    // ── Version 1.7 (1 function pointer) ──
+    _reserved_v1_7: ?*anyopaque = null,
+    // ── Version 1.8 (2 function pointers) ──
+    _reserved_v1_8a: ?*anyopaque = null,
+    _reserved_v1_8b: ?*anyopaque = null,
+    // ── Version 1.11 (2 function pointers) ──
+    _reserved_v1_11a: ?*anyopaque = null,
+    _reserved_v1_11b: ?*anyopaque = null,
+    // ── Version 1.12 (4 function pointers) ──
+    pfnCreate3: ?*const fn (ze_context_handle_t, ze_device_handle_t, *const ze_graph_desc_2_t, *ze_graph_handle_t, *?ze_graph_build_log_handle_t) callconv(.c) ze_result_t = null,
+    _reserved_v1_12b: ?*anyopaque = null,
+    pfnBuildLogGetString2: ?*const fn (ze_graph_build_log_handle_t, *u32, ?[*]u8) callconv(.c) ze_result_t = null,
+    pfnBuildLogDestroy: ?*const fn (ze_graph_build_log_handle_t) callconv(.c) ze_result_t = null,
 };
 
 // ── Function pointer types ──
@@ -242,6 +279,7 @@ pub const pfnMemAllocShared = *const fn (ze_context_handle_t, *const ze_device_m
 pub const pfnMemFree = *const fn (ze_context_handle_t, *anyopaque) callconv(.c) ze_result_t;
 
 pub const pfnDriverGetExtensionFunctionAddress = *const fn (ze_driver_handle_t, [*:0]const u8, *?*anyopaque) callconv(.c) ze_result_t;
+pub const pfnDriverGetExtensionProperties = *const fn (ze_driver_handle_t, *u32, ?[*]ze_driver_extension_properties_t) callconv(.c) ze_result_t;
 
 // ── Dispatch table ──
 
@@ -266,6 +304,7 @@ pub const Dispatch = struct {
     zeMemAllocShared: pfnMemAllocShared,
     zeMemFree: pfnMemFree,
     zeDriverGetExtensionFunctionAddress: pfnDriverGetExtensionFunctionAddress,
+    zeDriverGetExtensionProperties: pfnDriverGetExtensionProperties,
 
     pub fn load(l: *std.DynLib) !Dispatch {
         var self: Dispatch = undefined;
