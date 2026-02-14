@@ -76,40 +76,33 @@ fn detectHardware() DetectedHardware {
 const AccelChoice = enum { npu, gpu, cpu };
 
 fn promptAccelerator(hw: *const DetectedHardware) AccelChoice {
-    const stdout = std.fs.File.stdout();
-    const stdin = std.fs.File.stdin();
-
-    var option_count: u8 = 0;
     var options: [3]AccelChoice = undefined;
-
-    // Build option list
+    var count: u8 = 0;
     if (hw.intel_npu) {
-        option_count += 1;
-        options[option_count - 1] = .npu;
+        options[count] = .npu;
+        count += 1;
     }
     if (hw.intel_gpu) {
-        option_count += 1;
-        options[option_count - 1] = .gpu;
+        options[count] = .gpu;
+        count += 1;
     }
-    option_count += 1;
-    options[option_count - 1] = .cpu;
+    options[count] = .cpu;
+    count += 1;
 
-    // If only CPU available, skip prompt
-    if (option_count == 1) return .cpu;
+    if (count == 1) return .cpu;
 
+    const stdout = std.fs.File.stdout();
     _ = stdout.write("\nAvailable accelerators:\n") catch return .cpu;
-    for (0..option_count) |i| {
+    for (options[0..count], 1..) |opt, i| {
         var line_buf: [128]u8 = undefined;
-        const line = switch (options[i]) {
+        const line = switch (opt) {
             .npu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel NPU  — {s}\n", .{
-                i + 1,
-                std.mem.sliceTo(&hw.npu_name, 0),
+                i, std.mem.sliceTo(&hw.npu_name, 0),
             }) catch continue,
             .gpu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel GPU  — {s}\n", .{
-                i + 1,
-                std.mem.sliceTo(&hw.gpu_name, 0),
+                i, std.mem.sliceTo(&hw.gpu_name, 0),
             }) catch continue,
-            .cpu => std.fmt.bufPrint(&line_buf, "  [{d}] CPU only\n", .{i + 1}) catch continue,
+            .cpu => std.fmt.bufPrint(&line_buf, "  [{d}] CPU only\n", .{i}) catch continue,
         };
         _ = stdout.write(line) catch {};
     }
@@ -117,18 +110,12 @@ fn promptAccelerator(hw: *const DetectedHardware) AccelChoice {
     _ = stdout.write("Select [1]: ") catch return .cpu;
 
     var buf: [16]u8 = undefined;
-    const n = stdin.read(&buf) catch return .cpu;
-    if (n == 0) return options[0]; // default to first
+    const n = std.fs.File.stdin().read(&buf) catch return .cpu;
+    if (n == 0 or buf[0] == '\r' or buf[0] == '\n' or buf[0] == ' ') return options[0];
 
-    // Strip whitespace/newline
-    const sel_byte = buf[0];
-    if (sel_byte == '\r' or sel_byte == '\n' or sel_byte == ' ') return options[0]; // default
-
-    const sel_num = std.fmt.parseInt(u8, buf[0..1], 10) catch return options[0];
-    if (sel_num >= 1 and sel_num <= option_count) {
-        return options[sel_num - 1];
-    }
-    return options[0]; // default to first option
+    const sel = std.fmt.parseInt(u8, buf[0..1], 10) catch return options[0];
+    if (sel >= 1 and sel <= count) return options[sel - 1];
+    return options[0];
 }
 
 pub fn selectBackend() Backend {
