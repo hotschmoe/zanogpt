@@ -42,10 +42,10 @@ var num_bufs: usize = 0;
 
 fn getOrAllocShared(min_size: usize) !SharedBuf {
     const d = dispatch.?;
-    for (0..num_bufs) |i| {
-        if (shared_bufs[i].size >= min_size and !shared_bufs[i].in_use) {
-            shared_bufs[i].in_use = true;
-            return SharedBuf{ .ptr = shared_bufs[i].ptr, .size = shared_bufs[i].size };
+    for (shared_bufs[0..num_bufs]) |*buf| {
+        if (buf.size >= min_size and !buf.in_use) {
+            buf.in_use = true;
+            return buf.*;
         }
     }
     if (num_bufs >= MAX_BUFS) {
@@ -56,15 +56,16 @@ fn getOrAllocShared(min_size: usize) !SharedBuf {
     const dev_desc: ze.ze_device_mem_alloc_desc_t = .{};
     const host_desc: ze.ze_host_mem_alloc_desc_t = .{};
     try ze.check(d.zeMemAllocShared(context.?, &dev_desc, &host_desc, min_size, 64, device.?, &ptr));
-    shared_bufs[num_bufs] = .{ .ptr = ptr.?, .size = min_size, .in_use = true };
+    const idx = num_bufs;
     num_bufs += 1;
-    return SharedBuf{ .ptr = ptr.?, .size = min_size };
+    shared_bufs[idx] = .{ .ptr = ptr.?, .size = min_size, .in_use = true };
+    return shared_bufs[idx];
 }
 
 /// Release all shared buffers so they can be reused by the next operation.
 fn releaseSharedBufs() void {
-    for (0..num_bufs) |i| {
-        shared_bufs[i].in_use = false;
+    for (shared_bufs[0..num_bufs]) |*buf| {
+        buf.in_use = false;
     }
 }
 
