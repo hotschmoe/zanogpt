@@ -29,7 +29,12 @@ fn detectHardware() DetectedHardware {
         .qualcomm_npu = probeLib("QnnHtp.dll") or probeLib("libcdsprpc.dll"),
     };
 
-    // Try Level-Zero device enumeration for Intel GPU/NPU
+    // NPU detection: DLL probe (zeInit(0) often doesn't enumerate VPU devices
+    // on Intel systems --the NPU driver requires ZE_INIT_FLAG_VPU_ONLY which
+    // the actual intel_npu.init() handles).
+    hw.intel_npu = probeLib("ze_loader.dll");
+
+    // GPU detection: Level-Zero device enumeration
     var dll = std.DynLib.open("ze_loader.dll") catch return hw;
     defer dll.close();
 
@@ -96,10 +101,10 @@ fn promptAccelerator(hw: *const DetectedHardware) AccelChoice {
     for (options[0..count], 1..) |opt, i| {
         var line_buf: [128]u8 = undefined;
         const line = switch (opt) {
-            .npu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel NPU  — {s}\n", .{
+            .npu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel NPU  -- {s}\n", .{
                 i, std.mem.sliceTo(&hw.npu_name, 0),
             }) catch continue,
-            .gpu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel GPU  — {s}\n", .{
+            .gpu => std.fmt.bufPrint(&line_buf, "  [{d}] Intel GPU  -- {s}\n", .{
                 i, std.mem.sliceTo(&hw.gpu_name, 0),
             }) catch continue,
             .cpu => std.fmt.bufPrint(&line_buf, "  [{d}] CPU only\n", .{i}) catch continue,
