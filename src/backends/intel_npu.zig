@@ -4,8 +4,6 @@ const ov_ir = @import("ov_ir.zig");
 const cpu = @import("cpu.zig");
 const log = std.log.scoped(.intel_npu);
 
-// ── Module-level state ──
-
 var lib: ?std.DynLib = null;
 var dispatch: ?ze.Dispatch = null;
 var driver: ?ze.ze_driver_handle_t = null;
@@ -16,8 +14,6 @@ var graph_ddi: ?*const ze.ze_graph_dditable_t = null;
 var cmd_list: ?ze.ze_command_list_handle_t = null;
 var fence: ?ze.ze_fence_handle_t = null;
 var compiler_ver: ze.ze_graph_compiler_version_info_t = .{};
-
-// ── Graph cache ──
 
 pub const ShapeKey = struct {
     pub const Op = enum { matmul, softmax, relu };
@@ -43,42 +39,31 @@ const CachedGraph = struct {
 };
 
 const CacheEntry = struct {
-    key: ShapeKey,
-    graph: CachedGraph,
-    occupied: bool,
+    key: ShapeKey = .{ .op = .relu, .dims = .{ 0, 0, 0, 0 } },
+    graph: CachedGraph = .{ .graph = undefined, .num_args = 0, .arg_bufs = undefined },
+    occupied: bool = false,
 };
 
 const MAX_CACHED = 32;
-var cached_graphs: [MAX_CACHED]CacheEntry = .{empty_cache_entry} ** MAX_CACHED;
+var cached_graphs: [MAX_CACHED]CacheEntry = .{.{}} ** MAX_CACHED;
 var num_cached: usize = 0;
 
-const empty_cache_entry = CacheEntry{
-    .key = .{ .op = .relu, .dims = .{ 0, 0, 0, 0 } },
-    .graph = .{ .graph = undefined, .num_args = 0, .arg_bufs = undefined },
-    .occupied = false,
-};
-
-// ── Lifecycle ──
-
 pub fn init() !void {
-    // 1. Load ze_loader.dll at runtime
     lib = std.DynLib.open("ze_loader.dll") catch |err| {
         log.err("failed to load ze_loader.dll: {s}", .{@errorName(err)});
         return err;
     };
 
-    // 2. Resolve function pointers
     dispatch = ze.Dispatch.load(&lib.?) catch |err| {
         log.err("failed to resolve Level-Zero symbols: {s}", .{@errorName(err)});
         return err;
     };
     const d = dispatch.?;
 
-    // 3. Initialize Level-Zero (VPU/NPU devices only)
     try ze.check(d.zeInit(ze.ZE_INIT_FLAG_VPU_ONLY));
     log.info("Level-Zero initialized (VPU-only mode)", .{});
 
-    // 4. Enumerate drivers
+    // Enumerate drivers
     var driver_count: u32 = 0;
     try ze.check(d.zeDriverGet(&driver_count, null));
     if (driver_count == 0) {
@@ -87,12 +72,11 @@ pub fn init() !void {
     }
     log.info("found {d} Level-Zero driver(s)", .{driver_count});
 
-    // Allocate on stack for small counts (typically 1-2 drivers)
     var driver_buf: [8]ze.ze_driver_handle_t = undefined;
     const clamped_count = @min(driver_count, 8);
     try ze.check(d.zeDriverGet(&driver_count, &driver_buf));
 
-    // 5. Find a VPU device across all drivers
+    // Find a VPU/NPU device across all drivers
     var found_driver: ?ze.ze_driver_handle_t = null;
     var found_device: ?ze.ze_device_handle_t = null;
     var found_props: ze.ze_device_properties_t = .{};
@@ -126,19 +110,13 @@ pub fn init() !void {
 
     driver = found_driver;
     device = found_device;
+    log.info("NPU device: {s}", .{std.mem.sliceTo(&found_props.name, 0)});
 
-    // Log device name (null-terminated C string in the name field)
-    const name_slice = std.mem.sliceTo(&found_props.name, 0);
-    log.info("NPU device: {s}", .{name_slice});
-
-    // 7. Create context
     const ctx_desc: ze.ze_context_desc_t = .{};
     var ctx: ze.ze_context_handle_t = undefined;
     try ze.check(d.zeContextCreate(driver.?, &ctx_desc, &ctx));
     context = ctx;
-    log.info("Level-Zero context created", .{});
 
-    // 8. Create synchronous command queue
     const cq_desc: ze.ze_command_queue_desc_t = .{
         .mode = .SYNCHRONOUS,
         .priority = .NORMAL,
@@ -146,13 +124,10 @@ pub fn init() !void {
     var cq: ze.ze_command_queue_handle_t = undefined;
     try ze.check(d.zeCommandQueueCreate(context.?, device.?, &cq_desc, &cq));
     queue = cq;
-    log.info("Level-Zero command queue created (synchronous)", .{});
 
-    // 9. Acquire graph extension DDI table (two-tier mechanism matching OpenVINO)
     graph_ddi = try acquireGraphDDI(d, driver.?);
-    log.info("graph extension DDI table acquired", .{});
 
-    // 10. Query compiler version from device graph properties
+    // Query compiler version
     var dev_graph_props: ze.ze_device_graph_properties_t = .{};
     try ze.check(graph_ddi.?.pfnDeviceGetGraphProperties(device.?, &dev_graph_props));
     compiler_ver = dev_graph_props.compilerVersion;
@@ -163,38 +138,31 @@ pub fn init() !void {
         dev_graph_props.graphFormatsSupported,
         dev_graph_props.graphExtensionVersion,
     });
-    if (graph_ddi.?.pfnCreate2) |_| {
+    if (graph_ddi.?.pfnCreate2 != null) {
         log.info("pfnCreate2 (v1.5) available", .{});
     } else {
         log.info("pfnCreate2 (v1.5) NOT available, using pfnCreate (v1.0)", .{});
     }
 
-    // 11. Create reusable command list
     const cl_desc: ze.ze_command_list_desc_t = .{};
     var cl: ze.ze_command_list_handle_t = undefined;
     try ze.check(d.zeCommandListCreate(context.?, device.?, &cl_desc, &cl));
     cmd_list = cl;
-    log.info("reusable command list created", .{});
 
-    // 12. Create reusable fence
     const fence_desc: ze.ze_fence_desc_t = .{};
     var f: ze.ze_fence_handle_t = undefined;
     try ze.check(d.zeFenceCreate(queue.?, &fence_desc, &f));
     fence = f;
-    log.info("reusable fence created", .{});
 
-    // 13. Smoke test: compile a tiny ReLU graph
     try smokeTest();
-
     log.info("Intel NPU backend initialized successfully", .{});
 }
 
 /// Acquire the graph extension DDI table using OpenVINO's two-tier mechanism:
-/// 1. Enumerate driver extensions to find graph extension name + version
-/// 2. Try ZE_extension_driver_npu → pfnGetExtension (versioned acquisition)
+/// 1. Enumerate driver extensions to find ZE_extension_graph name + version
+/// 2. Try ZE_extension_driver_npu pfnGetExtension (versioned acquisition)
 /// 3. Fallback: zeDriverGetExtensionFunctionAddress with the extension name
 fn acquireGraphDDI(d: ze.Dispatch, drv: ze.ze_driver_handle_t) !*const ze.ze_graph_dditable_t {
-    // 1. Enumerate driver extensions to find graph extension
     var ext_count: u32 = 0;
     try ze.check(d.zeDriverGetExtensionProperties(drv, &ext_count, null));
 
@@ -202,7 +170,6 @@ fn acquireGraphDDI(d: ze.Dispatch, drv: ze.ze_driver_handle_t) !*const ze.ze_gra
     var fetch_count: u32 = @min(ext_count, 32);
     try ze.check(d.zeDriverGetExtensionProperties(drv, &fetch_count, &ext_buf));
 
-    // Find ZE_extension_graph by prefix match, pick min(target, driver) version
     const target_version: u32 = (1 << 16) | 5; // ZE_GRAPH_EXT_VERSION_1_5
     var graph_ext_version: u32 = 0;
     var graph_ext_idx: ?usize = null;
@@ -214,8 +181,7 @@ fn acquireGraphDDI(d: ze.Dispatch, drv: ze.ze_driver_handle_t) !*const ze.ze_gra
         if (std.mem.eql(u8, name, "ZE_extension_driver_npu")) {
             has_npu_driver_ext = true;
         }
-        if (name.len < graph_prefix.len) continue;
-        if (!std.mem.eql(u8, name[0..graph_prefix.len], graph_prefix)) continue;
+        if (!std.mem.startsWith(u8, name, graph_prefix)) continue;
 
         if (ext.version >= target_version) {
             graph_ext_version = target_version;
@@ -235,7 +201,7 @@ fn acquireGraphDDI(d: ze.Dispatch, drv: ze.ze_driver_handle_t) !*const ze.ze_gra
 
     const graph_ext_name: [*:0]const u8 = @ptrCast(&ext_buf[graph_ext_idx.?].name);
 
-    // 2. Try ZE_extension_driver_npu → pfnGetExtension (versioned path)
+    // Try versioned path via ZE_extension_driver_npu
     if (has_npu_driver_ext) {
         var npu_ddi_ptr: ?*anyopaque = null;
         if (d.zeDriverGetExtensionFunctionAddress(drv, "ZE_extension_driver_npu", &npu_ddi_ptr) == .SUCCESS) {
@@ -254,7 +220,7 @@ fn acquireGraphDDI(d: ze.Dispatch, drv: ze.ze_driver_handle_t) !*const ze.ze_gra
         }
     }
 
-    // 3. Fallback: zeDriverGetExtensionFunctionAddress
+    // Fallback: direct function address lookup
     var ddi_ptr: ?*anyopaque = null;
     try ze.check(d.zeDriverGetExtensionFunctionAddress(drv, graph_ext_name, &ddi_ptr));
     return @ptrCast(@alignCast(ddi_ptr.?));
@@ -262,9 +228,15 @@ fn acquireGraphDDI(d: ze.Dispatch, drv: ze.ze_driver_handle_t) !*const ze.ze_gra
 
 fn smokeTest() !void {
     log.info("running NPU smoke test (ReLU [4])...", .{});
-
-    const ddi = graph_ddi.?;
     const blob = ov_ir.reluBlob(4, compiler_ver);
+    const graph = try compileGraph(&blob, ov_ir.relu_build_flags);
+    _ = graph_ddi.?.pfnDestroy(graph);
+    log.info("smoke test passed", .{});
+}
+
+/// Compile a graph from an IR blob using pfnCreate2 (v1.5) with pfnCreate (v1.0) fallback.
+fn compileGraph(blob: *const ov_ir.BlobBuf, build_flags: [*:0]const u8) !ze.ze_graph_handle_t {
+    const ddi = graph_ddi.?;
     var graph: ze.ze_graph_handle_t = undefined;
 
     if (ddi.pfnCreate2) |create2| {
@@ -272,37 +244,28 @@ fn smokeTest() !void {
             .format = .NGRAPH_LITE,
             .inputSize = blob.len,
             .pInput = &blob.data,
-            .pBuildFlags = ov_ir.relu_build_flags,
+            .pBuildFlags = build_flags,
         };
-        const r = create2(context.?, device.?, &desc, &graph);
-        if (r != .SUCCESS) {
-            log.err("smoke test pfnCreate2 failed: 0x{x}", .{@intFromEnum(r)});
-            return error.InvalidArgument;
-        }
+        try ze.check(create2(context.?, device.?, &desc, &graph));
     } else {
         const desc: ze.ze_graph_desc_t = .{
             .format = .NGRAPH_LITE,
             .inputSize = blob.len,
             .pInput = &blob.data,
-            .pBuildFlags = ov_ir.relu_build_flags,
+            .pBuildFlags = build_flags,
         };
         try ze.check(ddi.pfnCreate(context.?, device.?, &desc, &graph));
     }
-
-    _ = ddi.pfnDestroy(graph);
-    log.info("smoke test passed", .{});
+    return graph;
 }
 
 pub fn deinit() void {
     const d = dispatch orelse return;
     const ddi = graph_ddi;
 
-    // 1. Destroy cached graphs + free shared memory
     for (&cached_graphs) |*entry| {
         if (!entry.occupied) continue;
-        if (ddi) |g| {
-            ze.check(g.pfnDestroy(entry.graph.graph)) catch {};
-        }
+        if (ddi) |g| ze.check(g.pfnDestroy(entry.graph.graph)) catch {};
         for (0..entry.graph.num_args) |i| {
             ze.check(d.zeMemFree(context.?, entry.graph.arg_bufs[i].ptr)) catch {};
         }
@@ -310,7 +273,6 @@ pub fn deinit() void {
     }
     num_cached = 0;
 
-    // 2. Destroy fence + command list
     if (fence) |f| {
         ze.check(d.zeFenceDestroy(f)) catch {};
         fence = null;
@@ -319,10 +281,8 @@ pub fn deinit() void {
         ze.check(d.zeCommandListDestroy(cl)) catch {};
         cmd_list = null;
     }
-
     graph_ddi = null;
 
-    // 3. Destroy queue, context, and unload library
     if (queue) |q| {
         ze.check(d.zeCommandQueueDestroy(q)) catch {};
         queue = null;
@@ -344,10 +304,7 @@ pub fn deinit() void {
     log.info("Intel NPU backend shut down", .{});
 }
 
-// ── Graph compilation and execution ──
-
 fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected: u32, build_flags: [*:0]const u8) !*CachedGraph {
-    // Linear scan for cache hit
     for (&cached_graphs) |*entry| {
         if (entry.occupied and std.meta.eql(entry.key, key)) {
             return &entry.graph;
@@ -362,47 +319,25 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
     const d = dispatch.?;
     const ddi = graph_ddi.?;
 
-    // Generate blob (includes VCL header with compiler version)
-    var blob = switch (key.op) {
+    const blob = switch (key.op) {
         .matmul => ov_ir.matmulBlob(key.dims[0], key.dims[1], compiler_ver),
         .softmax => ov_ir.softmaxBlob(key.dims[0], compiler_ver),
         .relu => ov_ir.reluBlob(key.dims[0], compiler_ver),
     };
 
-    // Compile graph via pfnCreate2 (v1.5), fall back to pfnCreate (v1.0)
     log.info("compiling graph: op={s} dims=[{d},{d},{d},{d}]", .{
         @tagName(key.op), key.dims[0], key.dims[1], key.dims[2], key.dims[3],
     });
 
-    var graph: ze.ze_graph_handle_t = undefined;
+    const graph = try compileGraph(&blob, build_flags);
 
-    if (ddi.pfnCreate2) |create2| {
-        const desc: ze.ze_graph_desc_2_t = .{
-            .format = .NGRAPH_LITE,
-            .inputSize = blob.len,
-            .pInput = &blob.data,
-            .pBuildFlags = build_flags,
-        };
-        try ze.check(create2(context.?, device.?, &desc, &graph));
-    } else {
-        const desc: ze.ze_graph_desc_t = .{
-            .format = .NGRAPH_LITE,
-            .inputSize = blob.len,
-            .pInput = &blob.data,
-            .pBuildFlags = build_flags,
-        };
-        try ze.check(ddi.pfnCreate(context.?, device.?, &desc, &graph));
-    }
-
-    // Query number of arguments
     var props: ze.ze_graph_properties_t = .{};
     try ze.check(ddi.pfnGetProperties(graph, &props));
-
     if (props.numGraphArgs != num_args_expected) {
         log.warn("graph has {d} args, expected {d}", .{ props.numGraphArgs, num_args_expected });
     }
 
-    // Allocate shared memory for each argument and bind
+    // Allocate shared memory for each argument and bind to graph
     var arg_bufs: [4]SharedBuf = undefined;
     const dev_mem_desc: ze.ze_device_mem_alloc_desc_t = .{};
     const host_mem_desc: ze.ze_host_mem_alloc_desc_t = .{};
@@ -414,13 +349,11 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
             &dev_mem_desc,
             &host_mem_desc,
             arg_sizes[i],
-            64, // alignment
+            64,
             device.?,
             &ptr,
         ));
         arg_bufs[i] = .{ .ptr = ptr.?, .size = arg_sizes[i] };
-
-        // Bind to graph argument
         try ze.check(ddi.pfnSetArgumentValue(graph, @intCast(i), ptr.?));
     }
 
@@ -429,7 +362,6 @@ fn getOrCompileGraph(key: ShapeKey, arg_sizes: []const usize, num_args_expected:
     try ze.check(ddi.pfnAppendGraphInitialize(cl, graph, null, 0, null));
     try submitAndSync(cl);
 
-    // Store in cache
     const entry = &cached_graphs[num_cached];
     entry.* = .{
         .key = key,
@@ -453,7 +385,6 @@ fn executeGraph(cached: *const CachedGraph) void {
     submitAndSync(cl) catch @panic("graph execution submit/sync failed");
 }
 
-/// Close the command list, submit it to the queue, wait on the fence, then reset both.
 fn submitAndSync(cl: ze.ze_command_list_handle_t) !void {
     const d = dispatch.?;
     try ze.check(d.zeCommandListClose(cl));
@@ -464,8 +395,6 @@ fn submitAndSync(cl: ze.ze_command_list_handle_t) !void {
     try ze.check(d.zeCommandListReset(cl));
 }
 
-// ── Backend contract (forward ops) ──
-
 pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize) void {
     const cached = getOrCompileGraph(
         .{ .op = .matmul, .dims = .{ @intCast(M), @intCast(K), 0, 0 } },
@@ -474,19 +403,10 @@ pub fn matmul_fwd(W: []const f32, x: []const f32, out: []f32, M: usize, K: usize
         ov_ir.matmul_build_flags,
     ) catch @panic("NPU matmul graph compilation failed");
 
-    // Copy W → shared mem (arg 0)
-    const w_buf = cached.arg_bufs[0].asF32Slice();
-    @memcpy(w_buf[0 .. M * K], W[0 .. M * K]);
-
-    // Copy x → shared mem (arg 1)
-    const x_buf = cached.arg_bufs[1].asF32Slice();
-    @memcpy(x_buf[0..K], x[0..K]);
-
+    @memcpy(cached.arg_bufs[0].asF32Slice()[0 .. M * K], W[0 .. M * K]);
+    @memcpy(cached.arg_bufs[1].asF32Slice()[0..K], x[0..K]);
     executeGraph(cached);
-
-    // Copy result ← shared mem (arg 2)
-    const out_buf = cached.arg_bufs[2].asF32Slice();
-    @memcpy(out[0..M], out_buf[0..M]);
+    @memcpy(out[0..M], cached.arg_bufs[2].asF32Slice()[0..M]);
 }
 
 pub fn softmax_fwd(input: []const f32, output: []f32, n: usize) void {
@@ -497,7 +417,6 @@ pub fn relu_fwd(input: []const f32, output: []f32, n: usize) void {
     runUnaryGraph(.relu, input, output, n, ov_ir.relu_build_flags);
 }
 
-/// Shared implementation for unary NPU ops (2-arg graph: input + output).
 fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize, build_flags: [*:0]const u8) void {
     const size = n * @sizeOf(f32);
     const cached = getOrCompileGraph(
@@ -512,8 +431,7 @@ fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize, b
     @memcpy(output[0..n], cached.arg_bufs[1].asF32Slice()[0..n]);
 }
 
+/// CPU fallback: rmsnorm needs scale_out for backward pass and is too small for NPU dispatch.
 pub fn rmsnorm_fwd(input: []const f32, output: []f32, n: usize, scale_out: *f32) void {
-    // CPU fallback — rmsnorm needs scale_out for backward pass, and 16-element
-    // tensors make NPU dispatch overhead dominate.
     cpu.rmsnorm_fwd(input, output, n, scale_out);
 }
