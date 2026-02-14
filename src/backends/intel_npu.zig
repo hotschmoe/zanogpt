@@ -45,7 +45,7 @@ const CacheEntry = struct {
 };
 
 const MAX_CACHED = 32;
-var cached_graphs: [MAX_CACHED]CacheEntry = .{.{}} ** MAX_CACHED;
+var cached_graphs: [MAX_CACHED]CacheEntry = .{CacheEntry{}} ** MAX_CACHED;
 var num_cached: usize = 0;
 
 pub fn init() !void {
