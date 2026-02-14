@@ -25,6 +25,8 @@ pub const ze_result_t = enum(u32) {
     ERROR_INVALID_ARGUMENT = 0x78000004,
     ERROR_INVALID_NULL_HANDLE = 0x78000005,
     ERROR_INVALID_NULL_POINTER = 0x78000006,
+    ERROR_MODULE_BUILD_FAILURE = 0x70000004,
+    ERROR_MODULE_LINK_FAILURE = 0x70000005,
     ERROR_INVALID_ENUMERATION = 0x7800000D,
     _,
 };
@@ -39,13 +41,15 @@ pub const ze_device_type_t = enum(u32) {
 };
 
 pub const ze_structure_type_t = enum(u32) {
-    DEVICE_PROPERTIES = 0x00010002,
-    CONTEXT_DESC = 0x0002000E,
-    COMMAND_QUEUE_DESC = 0x00030001,
-    COMMAND_LIST_DESC = 0x00030002,
-    FENCE_DESC = 0x00030003,
-    DEVICE_MEM_ALLOC_DESC = 0x00040001,
-    HOST_MEM_ALLOC_DESC = 0x00040002,
+    DEVICE_PROPERTIES = 0x3,
+    CONTEXT_DESC = 0xd,
+    COMMAND_QUEUE_DESC = 0xe,
+    COMMAND_LIST_DESC = 0xf,
+    FENCE_DESC = 0x12,
+    DEVICE_MEM_ALLOC_DESC = 0x15,
+    HOST_MEM_ALLOC_DESC = 0x16,
+    MODULE_DESC = 0x1b,
+    KERNEL_DESC = 0x1d,
     _,
 };
 
@@ -64,8 +68,8 @@ pub const ze_command_queue_priority_t = enum(u32) {
 };
 
 pub const ze_module_format_t = enum(u32) {
-    IL_SPIRV = 0x1,
-    NATIVE = 0x2,
+    IL_SPIRV = 0x0,
+    NATIVE = 0x1,
     _,
 };
 
@@ -147,7 +151,7 @@ pub const ze_host_mem_alloc_desc_t = extern struct {
 };
 
 pub const ze_module_desc_t = extern struct {
-    stype: u32 = 0x00020001, // ZE_STRUCTURE_TYPE_MODULE_DESC
+    stype: ze_structure_type_t = .MODULE_DESC,
     pNext: ?*anyopaque = null,
     format: ze_module_format_t = .IL_SPIRV,
     inputSize: usize = 0,
@@ -157,7 +161,7 @@ pub const ze_module_desc_t = extern struct {
 };
 
 pub const ze_kernel_desc_t = extern struct {
-    stype: u32 = 0x00020002, // ZE_STRUCTURE_TYPE_KERNEL_DESC
+    stype: ze_structure_type_t = .KERNEL_DESC,
     pNext: ?*anyopaque = null,
     flags: u32 = 0,
     pKernelName: [*:0]const u8,
@@ -369,6 +373,8 @@ pub const ZeError = error{
     InvalidNullHandle,
     InvalidNullPointer,
     InvalidEnumeration,
+    ModuleBuildFailure,
+    ModuleLinkFailure,
     NotReady,
     Unknown,
 };
@@ -386,6 +392,8 @@ pub fn check(result: ze_result_t) ZeError!void {
         .ERROR_INVALID_ARGUMENT => error.InvalidArgument,
         .ERROR_INVALID_NULL_HANDLE => error.InvalidNullHandle,
         .ERROR_INVALID_NULL_POINTER => error.InvalidNullPointer,
+        .ERROR_MODULE_BUILD_FAILURE => error.ModuleBuildFailure,
+        .ERROR_MODULE_LINK_FAILURE => error.ModuleLinkFailure,
         .ERROR_INVALID_ENUMERATION => error.InvalidEnumeration,
         _ => error.Unknown,
     };

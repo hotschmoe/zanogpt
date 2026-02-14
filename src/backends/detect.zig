@@ -82,7 +82,29 @@ pub fn selectBackend() Backend {
         log.info("Qualcomm NPU detected (not yet supported, using CPU)", .{});
     }
 
-    const choice = promptAccelerator(&hw);
+    // ZANOGPT_BACKEND=npu|gpu|cpu to skip the interactive prompt
+    const choice = blk: {
+        const env_w = std.process.getenvW(std.unicode.utf8ToUtf16LeStringLiteral("ZANOGPT_BACKEND"));
+        if (env_w) |val| {
+            var buf: [32]u8 = undefined;
+            const len = std.unicode.utf16LeToUtf8(&buf, val) catch break :blk promptAccelerator(&hw);
+            const env = buf[0..len];
+            if (std.mem.eql(u8, env, "npu")) {
+                log.info("ZANOGPT_BACKEND=npu (forced)", .{});
+                break :blk AccelChoice.npu;
+            } else if (std.mem.eql(u8, env, "gpu")) {
+                log.info("ZANOGPT_BACKEND=gpu (forced)", .{});
+                break :blk AccelChoice.gpu;
+            } else if (std.mem.eql(u8, env, "cpu")) {
+                log.info("ZANOGPT_BACKEND=cpu (forced)", .{});
+                break :blk AccelChoice.cpu;
+            } else {
+                log.warn("unknown ZANOGPT_BACKEND='{s}', ignoring", .{env});
+            }
+        }
+        break :blk promptAccelerator(&hw);
+    };
+
     switch (choice) {
         .npu => {
             intel_npu.init() catch |err| {

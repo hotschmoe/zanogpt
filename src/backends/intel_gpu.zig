@@ -68,7 +68,9 @@ fn getOrCompileKernel(cache: *?CachedKernel, spv_bytes: []const u8, kernel_name:
         .pInputModule = spv_bytes.ptr,
     };
     var mod: ze.ze_module_handle_t = undefined;
-    ze.check(d.zeModuleCreate(context.?, device.?, &mod_desc, &mod, null)) catch |err| {
+    const result = d.zeModuleCreate(context.?, device.?, &mod_desc, &mod, null);
+
+    ze.check(result) catch |err| {
         log.err("zeModuleCreate failed for kernel '{s}': {s}", .{ kernel_name, @errorName(err) });
         return err;
     };
