@@ -435,3 +435,16 @@ fn runUnaryGraph(op: ShapeKey.Op, input: []const f32, output: []f32, n: usize, b
 pub fn rmsnorm_fwd(input: []const f32, output: []f32, n: usize, scale_out: *f32) void {
     cpu.rmsnorm_fwd(input, output, n, scale_out);
 }
+
+const Backend = @import("backend.zig").Backend;
+
+pub fn backend() Backend {
+    return .{
+        .matmul_fwd = &matmul_fwd,
+        .softmax_fwd = &softmax_fwd,
+        .relu_fwd = &relu_fwd,
+        .rmsnorm_fwd = &rmsnorm_fwd,
+        .deinit = &deinit,
+        .name = "intel_npu",
+    };
+}

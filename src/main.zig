@@ -208,7 +208,7 @@ pub fn main() !void {
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
 
-    try zanogpt.backend.init();
+    zanogpt.backend = zanogpt.detect.selectBackend();
     defer zanogpt.backend.deinit();
 
     var stdout_buf: [4096]u8 = undefined;

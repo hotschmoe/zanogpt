@@ -1,12 +1,12 @@
 const std = @import("std");
 const math = std.math;
 const Allocator = std.mem.Allocator;
-const build_options = @import("build_options");
 
-pub const backend = switch (build_options.backend) {
-    .cpu => @import("backends/cpu.zig"),
-    .intel_npu => @import("backends/intel_npu.zig"),
-};
+pub const Backend = @import("backends/backend.zig").Backend;
+pub const detect = @import("backends/detect.zig");
+const cpu = @import("backends/cpu.zig");
+
+pub var backend: Backend = cpu.backend();
 
 pub const Tensor = struct {
     data: []f32,

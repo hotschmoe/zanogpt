@@ -17,17 +17,10 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const BackendChoice = enum { cpu, intel_npu };
-    const backend = b.option(BackendChoice, "backend", "Compute backend (default: cpu)") orelse .cpu;
-
-    const options = b.addOptions();
-    options.addOption(BackendChoice, "backend", backend);
-
     const mod = b.addModule("zanogpt", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
-    mod.addOptions("build_options", options);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function

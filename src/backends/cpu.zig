@@ -44,3 +44,16 @@ pub fn rmsnorm_fwd(input: []const f32, output: []f32, n: usize, scale_out: *f32)
 pub fn relu_fwd(input: []const f32, output: []f32, n: usize) void {
     for (0..n) |i| output[i] = @max(0, input[i]);
 }
+
+const Backend = @import("backend.zig").Backend;
+
+pub fn backend() Backend {
+    return .{
+        .matmul_fwd = &matmul_fwd,
+        .softmax_fwd = &softmax_fwd,
+        .relu_fwd = &relu_fwd,
+        .rmsnorm_fwd = &rmsnorm_fwd,
+        .deinit = &deinit,
+        .name = "cpu",
+    };
+}
