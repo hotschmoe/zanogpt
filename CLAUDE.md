@@ -22,10 +22,28 @@ Requires Zig **0.15.2+** (see `build.zig.zon`). Zero external dependencies.
 
 Two Zig modules defined in `build.zig`:
 
-- **`src/root.zig`** — Library module exposed as `"zanogpt"`. This is the public API surface; all reusable logic (autograd, transformer, tokenizer, optimizer) belongs here.
+- **`src/root.zig`** — Library module exposed as `"zanogpt"`. Public API surface: autograd, transformer, tokenizer, optimizer.
 - **`src/main.zig`** — Executable entry point. Imports the library via `@import("zanogpt")`. Orchestrates training and inference.
 
-The project is currently scaffolded — the core GPT components (autograd `Value` type, transformer forward pass, Adam optimizer, tokenizer) still need to be implemented in Zig, following the reference Python in `reference/microgpt.py`.
+### Backend System
+
+Hardware-accelerated compute backends in `src/backends/`:
+
+| File | Purpose |
+|------|---------|
+| `detect.zig` | Auto-detection & interactive/env-var backend selection |
+| `backend.zig` | Backend interface (function pointer table: matmul, softmax, relu, rmsnorm) |
+| `cpu.zig` | CPU backend (scalar/SIMD) |
+| `intel_npu.zig` | Intel NPU via Level-Zero Graph Extension API |
+| `intel_gpu.zig` | Intel GPU via Level-Zero compute kernels |
+| `ze.zig` | Level-Zero C FFI bindings (shared by NPU + GPU) |
+| `ov_ir.zig` | OpenVINO IR XML generation (NPU graph compilation) |
+| `spirv.zig` | Programmatic SPIR-V binary generation (GPU compute kernels) |
+
+**Key constraints:**
+- `zeInit()` is process-global -- each backend must call it with its own flags. Never call `zeInit()` during detection.
+- NPU uses `ZE_INIT_FLAG_VPU_ONLY`; GPU uses `zeInit(0)`.
+- `ZANOGPT_BACKEND=npu|gpu|cpu` environment variable skips the interactive prompt.
 
 ## Model Hyperparameters
 

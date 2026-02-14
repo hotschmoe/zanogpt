@@ -15,18 +15,46 @@ Trains a tiny GPT (transformer) model on a dataset of names, then generates new,
 - **Adam optimizer** — with linear learning rate decay
 - **Tokenizer** — character-level tokenization
 
+## Hardware Acceleration
+
+ZanoGPT auto-detects available accelerators at startup and prompts you to choose:
+
+| Backend | Hardware | API |
+|---------|----------|-----|
+| **Intel NPU** | Intel AI Boost (Core Ultra) | Level-Zero Graph Extension (OpenVINO IR) |
+| **Intel GPU** | Intel Arc Graphics | Level-Zero Compute (SPIR-V kernels) |
+| **CPU** | Any | Zig SIMD/scalar |
+
+To skip the interactive prompt, set the `ZANOGPT_BACKEND` environment variable:
+
+```bash
+ZANOGPT_BACKEND=gpu zig build run    # Force GPU
+ZANOGPT_BACKEND=npu zig build run    # Force NPU
+ZANOGPT_BACKEND=cpu zig build run    # Force CPU
+```
+
 ## Project Structure
 
 ```
 zanogpt/
-├── build.zig          # Zig build system
-├── build.zig.zon      # Package manifest
-├── src/               # Zig source
+├── build.zig              # Zig build system
+├── build.zig.zon          # Package manifest
+├── src/
+│   ├── main.zig           # Executable entry point
+│   ├── root.zig           # Library module (autograd, transformer, etc.)
+│   └── backends/
+│       ├── detect.zig     # Hardware detection & backend selection
+│       ├── backend.zig    # Backend interface (function pointer table)
+│       ├── cpu.zig        # CPU backend
+│       ├── intel_npu.zig  # Intel NPU backend (Level-Zero + Graph API)
+│       ├── intel_gpu.zig  # Intel GPU backend (Level-Zero + compute)
+│       ├── ze.zig         # Level-Zero FFI bindings
+│       ├── ov_ir.zig      # OpenVINO IR XML generation (for NPU)
+│       └── spirv.zig      # Programmatic SPIR-V generation (for GPU)
 ├── data/
-│   └── names.txt      # 32k names dataset (from Karpathy's makemore)
-├── reference/
-│   └── microgpt.py    # Original Python reference implementation
-└── README.md
+│   └── names.txt          # 32k names dataset (from Karpathy's makemore)
+└── reference/
+    └── microgpt.py        # Original Python reference implementation
 ```
 
 ## Dataset
@@ -46,8 +74,12 @@ zanogpt/
 ## Building & Running
 
 ```bash
-zig build run
+zig build run          # Build and run (interactive accelerator prompt)
+zig build test         # Run all tests
+zig build              # Build only (output in zig-out/)
 ```
+
+Requires Zig **0.15.2+**.
 
 ## Why Zig?
 
