@@ -9,6 +9,8 @@ pub const ze_fence_handle_t = *opaque {};
 pub const ze_graph_handle_t = *opaque {};
 pub const ze_event_handle_t = *opaque {};
 pub const ze_graph_build_log_handle_t = *opaque {};
+pub const ze_module_handle_t = *opaque {};
+pub const ze_kernel_handle_t = *opaque {};
 
 pub const ze_result_t = enum(u32) {
     SUCCESS = 0,
@@ -57,6 +59,12 @@ pub const ze_command_queue_priority_t = enum(u32) {
     NORMAL = 0,
     PRIORITY_LOW = 1,
     PRIORITY_HIGH = 2,
+    _,
+};
+
+pub const ze_module_format_t = enum(u32) {
+    IL_SPIRV = 0x1,
+    NATIVE = 0x2,
     _,
 };
 
@@ -135,6 +143,29 @@ pub const ze_host_mem_alloc_desc_t = extern struct {
     stype: ze_structure_type_t = .HOST_MEM_ALLOC_DESC,
     pNext: ?*anyopaque = null,
     flags: u32 = 0,
+};
+
+pub const ze_module_desc_t = extern struct {
+    stype: u32 = 0x00020001, // ZE_STRUCTURE_TYPE_MODULE_DESC
+    pNext: ?*anyopaque = null,
+    format: ze_module_format_t = .IL_SPIRV,
+    inputSize: usize = 0,
+    pInputModule: ?[*]const u8 = null,
+    pBuildFlags: ?[*:0]const u8 = null,
+    pConstants: ?*anyopaque = null,
+};
+
+pub const ze_kernel_desc_t = extern struct {
+    stype: u32 = 0x00020002, // ZE_STRUCTURE_TYPE_KERNEL_DESC
+    pNext: ?*anyopaque = null,
+    flags: u32 = 0,
+    pKernelName: [*:0]const u8,
+};
+
+pub const ze_group_count_t = extern struct {
+    groupCountX: u32 = 1,
+    groupCountY: u32 = 1,
+    groupCountZ: u32 = 1,
 };
 
 pub const ze_driver_extension_properties_t = extern struct {
@@ -268,6 +299,17 @@ pub const pfnMemFree = *const fn (ze_context_handle_t, *anyopaque) callconv(.c) 
 pub const pfnDriverGetExtensionFunctionAddress = *const fn (ze_driver_handle_t, [*:0]const u8, *?*anyopaque) callconv(.c) ze_result_t;
 pub const pfnDriverGetExtensionProperties = *const fn (ze_driver_handle_t, *u32, ?[*]ze_driver_extension_properties_t) callconv(.c) ze_result_t;
 
+pub const pfnModuleCreate = *const fn (ze_context_handle_t, ze_device_handle_t, *const ze_module_desc_t, *ze_module_handle_t, ?*?*anyopaque) callconv(.c) ze_result_t;
+pub const pfnModuleDestroy = *const fn (ze_module_handle_t) callconv(.c) ze_result_t;
+pub const pfnKernelCreate = *const fn (ze_module_handle_t, *const ze_kernel_desc_t, *ze_kernel_handle_t) callconv(.c) ze_result_t;
+pub const pfnKernelDestroy = *const fn (ze_kernel_handle_t) callconv(.c) ze_result_t;
+pub const pfnKernelSetGroupSize = *const fn (ze_kernel_handle_t, u32, u32, u32) callconv(.c) ze_result_t;
+pub const pfnKernelSetArgValue = *const fn (ze_kernel_handle_t, u32, usize, ?*const anyopaque) callconv(.c) ze_result_t;
+pub const pfnKernelSuggestGroupSize = *const fn (ze_kernel_handle_t, u32, u32, u32, *u32, *u32, *u32) callconv(.c) ze_result_t;
+pub const pfnCommandListAppendLaunchKernel = *const fn (ze_command_list_handle_t, ze_kernel_handle_t, *const ze_group_count_t, ?ze_event_handle_t, u32, ?[*]ze_event_handle_t) callconv(.c) ze_result_t;
+pub const pfnMemAllocDevice = *const fn (ze_context_handle_t, *const ze_device_mem_alloc_desc_t, usize, usize, ze_device_handle_t, *?*anyopaque) callconv(.c) ze_result_t;
+pub const pfnCommandListAppendMemoryCopy = *const fn (ze_command_list_handle_t, *anyopaque, *const anyopaque, usize, ?ze_event_handle_t, u32, ?[*]ze_event_handle_t) callconv(.c) ze_result_t;
+
 pub const Dispatch = struct {
     zeInit: pfnInit,
     zeDriverGet: pfnDriverGet,
@@ -290,6 +332,16 @@ pub const Dispatch = struct {
     zeMemFree: pfnMemFree,
     zeDriverGetExtensionFunctionAddress: pfnDriverGetExtensionFunctionAddress,
     zeDriverGetExtensionProperties: pfnDriverGetExtensionProperties,
+    zeModuleCreate: pfnModuleCreate,
+    zeModuleDestroy: pfnModuleDestroy,
+    zeKernelCreate: pfnKernelCreate,
+    zeKernelDestroy: pfnKernelDestroy,
+    zeKernelSetGroupSize: pfnKernelSetGroupSize,
+    zeKernelSetArgumentValue: pfnKernelSetArgValue,
+    zeKernelSuggestGroupSize: pfnKernelSuggestGroupSize,
+    zeCommandListAppendLaunchKernel: pfnCommandListAppendLaunchKernel,
+    zeMemAllocDevice: pfnMemAllocDevice,
+    zeCommandListAppendMemoryCopy: pfnCommandListAppendMemoryCopy,
 
     pub fn load(l: *std.DynLib) !Dispatch {
         var self: Dispatch = undefined;
